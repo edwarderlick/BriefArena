@@ -93,13 +93,24 @@ import {
   buildTimeoutJudgementSubmitInput,
   buildTimeoutJudgementPolicyInput,
   createKit,
+  classifyWalletDispatchError,
+  isProvenPreBroadcastWalletFailure,
   type CreateChallengeFormValues,
   type SubmitEntryFormValues,
   type CancelChallengeFormValues,
   type LifecycleChallengeFormValues,
+  type WalletErrorClassification,
 } from './transactionService';
 import type { Address } from './contractClient';
-import { CONTRACT_ADDRESS, readOnlyClient } from './contractClient';
+import {
+  CONTRACT_ADDRESS,
+  readOnlyClient,
+  getContractCredit,
+  getContractWithdrawn,
+  toCalldataAddress,
+} from './contractClient';
+
+export { isProvenPreBroadcastWalletFailure, type WalletErrorClassification };
 import { useWallet } from '../context/WalletContext';
 import { Challenge, NETWORK_CONFIG } from '../types';
 
@@ -193,6 +204,29 @@ export interface PersistedTxRecord {
   explorerLink?: string | null;
   error?: string;
   errorMessage?: string;
+}
+
+export interface ReconciliationEvidence {
+  walletActivityChecked?: boolean;
+  noPendingTxInWallet?: boolean;
+  explorerChecked?: boolean;
+  userNotes?: string;
+  currentLiveCreditWei?: bigint;
+  currentLiveWithdrawnWei?: bigint;
+}
+
+export interface ReconciliationOutcome {
+  actionKey: string;
+  actionType: TransactionActionType;
+  resolved: boolean;
+  outcome:
+    | 'confirmed_success'
+    | 'confirmed_failed'
+    | 'unchanged_credit_still_blocked'
+    | 'reconciled_and_unlocked';
+  creditRemainingWei?: bigint | null;
+  genWithdrawnWei?: bigint | null;
+  message: string;
 }
 
 const memoryTxStore = new Map<string, PersistedTxRecord>();
@@ -970,7 +1004,10 @@ export class TransactionController {
    * If lookup fails or outcome is unknown, retains the duplicate block.
    * Defaults to readOnlyClient when clientOrKit is not provided.
    */
-  public async reconcile(clientOrKit?: any): Promise<PersistedTxRecord | null> {
+  public async reconcile(
+    clientOrKit?: any,
+    evidence?: ReconciliationEvidence
+  ): Promise<PersistedTxRecord | null> {
     const existing = getPersistedTransaction(this.actionKey);
     if (!existing) {
       return null;
@@ -1028,6 +1065,72 @@ export class TransactionController {
     }
 
     if (!existing.txId) {
+      if (existing.actionType === 'withdraw') {
+        let liveCreditWei: bigint | null = null;
+        let liveWithdrawnWei: bigint | null = null;
+        const resolvedAddr = this.params.contractAddress || CONTRACT_ADDRESS;
+        const resolvedWallet = this.params.walletState.address || existing.walletAddress;
+
+        if (resolvedAddr && resolvedWallet) {
+          try {
+            [liveCreditWei, liveWithdrawnWei] = await Promise.all([
+              getContractCredit(resolvedAddr as Address, resolvedWallet),
+              getContractWithdrawn(resolvedAddr as Address, resolvedWallet),
+            ]);
+          } catch (readErr) {
+            console.warn('Failed reading live contract credit during reconciliation:', readErr);
+          }
+        }
+        void liveWithdrawnWei;
+
+        const savedCredit = existing.claimableCreditWei ? BigInt(existing.claimableCreditWei) : null;
+
+        // 1. Confirmed success: credit decreased on-chain
+        if (liveCreditWei !== null && savedCredit !== null && savedCredit > 0n && liveCreditWei < savedCredit) {
+          existing.status = 'success';
+          existing.executionResultName = 'FINISHED_WITH_RETURN';
+          this.state.phase = 'success';
+          this.state.isDuplicateBlocked = false;
+          this.state.unresolvedMessage = null;
+          persistTransactionRecord(existing);
+          await this.triggerStateRefresh();
+          this.notify();
+          return existing;
+        }
+
+        // 2. Unchanged credit:
+        // An unchanged credit balance alone must NOT silently unlock a possibly pending transaction.
+        if (evidence?.noPendingTxInWallet === true && evidence?.walletActivityChecked === true) {
+          clearPersistedTransaction(this.actionKey);
+          this.state.isDuplicateBlocked = false;
+          this.state.phase = 'idle';
+          this.state.unresolvedMessage = null;
+          this.state.errorMessage = null;
+          this.notify();
+          return null;
+        }
+
+        this.state.isDuplicateBlocked = true;
+        this.state.phase = 'unknown';
+        this.state.txId = null;
+        this.state.explorerLink = null;
+        this.state.unresolvedMessage =
+          'Ambiguous submission with no returned transaction ID. Cannot query chain status automatically. Retaining duplicate submission block; manual reconciliation required.';
+        this.notify();
+        return existing;
+      }
+
+      // Generic actions without txId
+      if (evidence?.noPendingTxInWallet === true && evidence?.walletActivityChecked === true) {
+        clearPersistedTransaction(this.actionKey);
+        this.state.isDuplicateBlocked = false;
+        this.state.phase = 'idle';
+        this.state.unresolvedMessage = null;
+        this.state.errorMessage = null;
+        this.notify();
+        return null;
+      }
+
       // Ambiguous submission without a transaction ID: cannot query chain automatically
       this.state.isDuplicateBlocked = true;
       this.state.phase = 'unknown';
@@ -1118,6 +1221,166 @@ export class TransactionController {
     this.notify();
     return existing;
   }
+
+  /**
+   * Explicit user-facing reconciliation flow for genuinely ambiguous cases.
+   * Leverages:
+   *   1. Wallet activity (user asserts whether transaction was broadcast or pending).
+   *   2. Explorer evidence.
+   *   3. Fresh contract reads (checks get_credit and get_withdrawn).
+   *
+   * Crucial Safety Invariant:
+   *   An unchanged credit balance alone must NOT silently unlock a possibly pending transaction.
+   *   Unlocking requires explicit confirmation that wallet activity has no pending transaction.
+   */
+  public async reconcileAmbiguous(
+    evidence?: ReconciliationEvidence,
+    clientOrKit?: any
+  ): Promise<ReconciliationOutcome> {
+    const existing = getPersistedTransaction(this.actionKey);
+    if (!existing) {
+      this.state.isDuplicateBlocked = false;
+      this.state.phase = 'idle';
+      this.state.unresolvedMessage = null;
+      this.notify();
+      return {
+        actionKey: this.actionKey,
+        actionType: this.params.actionType,
+        resolved: true,
+        outcome: 'reconciled_and_unlocked',
+        message: 'No active unresolved transaction found for this action.',
+      };
+    }
+
+    if (this.params.actionType === 'withdraw' || existing.actionType === 'withdraw') {
+      let liveCreditWei: bigint | null =
+        evidence?.currentLiveCreditWei !== undefined ? evidence.currentLiveCreditWei : null;
+      let liveWithdrawnWei: bigint | null =
+        evidence?.currentLiveWithdrawnWei !== undefined ? evidence.currentLiveWithdrawnWei : null;
+      const resolvedAddr = this.params.contractAddress || CONTRACT_ADDRESS;
+      const resolvedWallet = this.params.walletState.address || existing.walletAddress;
+
+      if (liveCreditWei === null && resolvedAddr && resolvedWallet) {
+        if (clientOrKit && typeof clientOrKit.readContract === 'function') {
+          try {
+            const [c, w] = await Promise.all([
+              clientOrKit.readContract({
+                address: resolvedAddr,
+                functionName: 'get_credit',
+                args: [toCalldataAddress(resolvedWallet)],
+              }),
+              clientOrKit.readContract({
+                address: resolvedAddr,
+                functionName: 'get_withdrawn',
+                args: [toCalldataAddress(resolvedWallet)],
+              }),
+            ]);
+            liveCreditWei = BigInt(c || 0);
+            liveWithdrawnWei = BigInt(w || 0);
+          } catch (readErr) {
+            console.warn('Custom client readContract error in reconcileAmbiguous:', readErr);
+          }
+        } else {
+          try {
+            [liveCreditWei, liveWithdrawnWei] = await Promise.all([
+              getContractCredit(resolvedAddr as Address, resolvedWallet),
+              getContractWithdrawn(resolvedAddr as Address, resolvedWallet),
+            ]);
+          } catch (readErr) {
+            console.warn('Failed reading live contract credit during reconciliation:', readErr);
+          }
+        }
+      }
+
+      const savedCredit = existing.claimableCreditWei ? BigInt(existing.claimableCreditWei) : null;
+
+      // 1. Confirmed success: credit decreased on-chain
+      if (liveCreditWei !== null && savedCredit !== null && savedCredit > 0n && liveCreditWei < savedCredit) {
+        existing.status = 'success';
+        existing.executionResultName = 'FINISHED_WITH_RETURN';
+        this.state.phase = 'success';
+        this.state.isDuplicateBlocked = false;
+        this.state.unresolvedMessage = null;
+        persistTransactionRecord(existing);
+        await this.triggerStateRefresh();
+        this.notify();
+        return {
+          actionKey: this.actionKey,
+          actionType: 'withdraw',
+          resolved: true,
+          outcome: 'confirmed_success',
+          creditRemainingWei: liveCreditWei,
+          genWithdrawnWei: liveWithdrawnWei,
+          message: 'Confirmed on-chain: internal credit was deducted. Withdrawal succeeded.',
+        };
+      }
+
+      // 2. Unchanged credit:
+      // An unchanged credit balance alone must NOT silently unlock a possibly pending transaction.
+      if (!evidence?.walletActivityChecked || !evidence?.noPendingTxInWallet) {
+        this.state.isDuplicateBlocked = true;
+        this.state.phase = 'unknown';
+        const amtStr = liveCreditWei !== null ? `${(Number(liveCreditWei) / 1e18).toFixed(2)} test GEN` : 'unknown';
+        this.state.unresolvedMessage = `Live contract credit is unchanged (${amtStr} remaining). An unchanged credit balance alone does not prove a broadcasted transaction will not execute. Confirm in wallet activity that no transaction is pending.`;
+        this.notify();
+        return {
+          actionKey: this.actionKey,
+          actionType: 'withdraw',
+          resolved: false,
+          outcome: 'unchanged_credit_still_blocked',
+          creditRemainingWei: liveCreditWei,
+          genWithdrawnWei: liveWithdrawnWei,
+          message: this.state.unresolvedMessage,
+        };
+      }
+
+      // 3. User explicitly confirmed wallet activity has no pending transaction AND live credit verified intact:
+      // Release ONLY that action's lock!
+      clearPersistedTransaction(this.actionKey);
+      this.state.isDuplicateBlocked = false;
+      this.state.phase = 'idle';
+      this.state.unresolvedMessage = null;
+      this.state.errorMessage = null;
+      this.notify();
+      return {
+        actionKey: this.actionKey,
+        actionType: 'withdraw',
+        resolved: true,
+        outcome: 'reconciled_and_unlocked',
+        creditRemainingWei: liveCreditWei,
+        genWithdrawnWei: liveWithdrawnWei,
+        message: 'Reconciliation complete: verified wallet activity has no pending transaction and credit is intact. Action lock released for retry.',
+      };
+    }
+
+    // Generic actions:
+    if (evidence?.walletActivityChecked && evidence?.noPendingTxInWallet) {
+      clearPersistedTransaction(this.actionKey);
+      this.state.isDuplicateBlocked = false;
+      this.state.phase = 'idle';
+      this.state.unresolvedMessage = null;
+      this.state.errorMessage = null;
+      this.notify();
+      return {
+        actionKey: this.actionKey,
+        actionType: this.params.actionType,
+        resolved: true,
+        outcome: 'reconciled_and_unlocked',
+        message: 'Reconciliation complete: verified wallet activity. Action lock released.',
+      };
+    }
+
+    this.state.isDuplicateBlocked = true;
+    this.notify();
+    return {
+      actionKey: this.actionKey,
+      actionType: this.params.actionType,
+      resolved: false,
+      outcome: 'unchanged_credit_still_blocked',
+      message: 'Unresolved transaction retained. Confirm wallet activity has no pending transaction to release lock.',
+    };
+  }
+
 
   public async estimateFee(kit: TransactionKit): Promise<PolicyQuote> {
     const validation = this.validate();
@@ -1262,15 +1525,38 @@ export class TransactionController {
     try {
       dispatched = await dispatchTransaction(kit, quoteToUse, freshValidation.submitInput);
     } catch (err) {
-      // Submit exception after dispatch initiation: fail closed as ambiguous
-      const returnedTxId = (err as any)?.genlayerTxId || (err as any)?.txId || null;
+      const classification = classifyWalletDispatchError(err);
+
+      // Proven pre-broadcast wallet failure / rejection (e.g. MetaMask "Send failed" with no txId, code 4001, etc.)
+      if (classification.isPreBroadcastFailure) {
+        // Release ONLY that action's lock and do not save ambiguous transaction record
+        clearPersistedTransaction(this.actionKey);
+        this.state.phase = 'error';
+        this.state.isDuplicateBlocked = false;
+        this.state.txId = null;
+        this.state.explorerLink = null;
+        this.state.unresolvedMessage = null;
+        this.state.errorMessage = classification.userMessage;
+        this.notify();
+
+        throw new TransactionServiceError(
+          'DISPATCH_FAILED',
+          classification.userMessage,
+          err
+        );
+      }
+
+      // Genuinely ambiguous cases: keep the duplicate block and persist ambiguous record
+      const returnedTxId =
+        (err as any)?.genlayerTxId ||
+        (err as any)?.txId ||
+        (err as any)?.hash ||
+        null;
       this.state.phase = 'unknown';
       this.state.isDuplicateBlocked = true;
       this.state.txId = returnedTxId;
       this.state.explorerLink = returnedTxId ? makeTxExplorerLink(returnedTxId) : null;
-      this.state.unresolvedMessage = returnedTxId
-        ? `Transaction dispatch encountered an error for ID ${returnedTxId}. Status is ambiguous; duplicate submission is blocked. Verify receipt before retrying.`
-        : 'Ambiguous submission: Transaction dispatch encountered an error before receiving a transaction ID. Resubmission is blocked to protect against duplicate execution. Please check your wallet or network activity and reconcile manually.';
+      this.state.unresolvedMessage = classification.userMessage;
 
       persistTransactionRecord({
         txId: returnedTxId,
@@ -1282,9 +1568,14 @@ export class TransactionController {
         actionType: this.params.actionType,
         args: freshValidation.submitInput.args ?? [],
         userValueWei: (freshValidation.policyInput.userValue ?? 0n).toString(),
+        claimableCreditWei:
+          this.params.claimableCreditWei !== undefined && this.params.claimableCreditWei !== null
+            ? this.params.claimableCreditWei.toString()
+            : null,
         submittedAt: Date.now(),
         status: 'ambiguous',
         error: (err as Error)?.message || String(err),
+        errorMessage: classification.userMessage,
         explorerLink: this.state.explorerLink,
       });
       this.notify();
@@ -1906,9 +2197,19 @@ export function useTransactionController(
     return controllerRef.current?.submit(kit);
   }, [kit]);
 
-  const reconcile = useCallback(async (client?: any) => {
-    return controllerRef.current?.reconcile(client || kit || readOnlyClient);
-  }, [kit]);
+  const reconcile = useCallback(
+    async (client?: any, evidence?: ReconciliationEvidence) => {
+      return controllerRef.current?.reconcile(client || kit || readOnlyClient, evidence);
+    },
+    [kit]
+  );
+
+  const reconcileAmbiguous = useCallback(
+    async (evidence?: ReconciliationEvidence) => {
+      return controllerRef.current?.reconcileAmbiguous(evidence);
+    },
+    []
+  );
 
   const reset = useCallback((options?: { force?: boolean }) => {
     controllerRef.current?.reset(options);
@@ -1920,6 +2221,7 @@ export function useTransactionController(
     estimateFee,
     submit,
     reconcile,
+    reconcileAmbiguous,
     reset,
     controller: controllerRef.current,
   };

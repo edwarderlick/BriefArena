@@ -59,3 +59,8 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Portal assets
+BriefArena-Logo-800x800.png
+public_assets/
+

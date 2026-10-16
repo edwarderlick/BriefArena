@@ -32,8 +32,12 @@ export interface ContractPendingModalProps {
   isSubmitting?: boolean;
   isDuplicateBlocked?: boolean;
   unresolvedMessage?: string | null;
+  errorMessage?: string | null;
+  walletAddress?: string | null;
   onConfirmSubmit?: () => Promise<void> | void;
   onRetryEstimate?: () => Promise<any> | void;
+  onReconcileCheckContract?: () => Promise<{ creditWei: bigint | null; withdrawnWei: bigint | null; message?: string }>;
+  onReconcileReleaseLock?: () => Promise<void> | void;
 }
 
 function safeJsonStringify(obj: any): string {
@@ -75,10 +79,23 @@ export const ContractPendingModal: React.FC<ContractPendingModalProps> = ({
   isSubmitting = false,
   isDuplicateBlocked = false,
   unresolvedMessage = null,
+  errorMessage = null,
+  walletAddress = null,
   onConfirmSubmit,
   onRetryEstimate,
+  onReconcileCheckContract,
+  onReconcileReleaseLock,
 }) => {
   const [showRawJson, setShowRawJson] = useState(false);
+  const [isCheckingContract, setIsCheckingContract] = useState(false);
+  const [contractCheckResult, setContractCheckResult] = useState<{
+    creditWei: bigint | null;
+    withdrawnWei: bigint | null;
+    message?: string;
+  } | null>(null);
+  const [walletActivityConfirmed, setWalletActivityConfirmed] = useState(false);
+  const [isReconcilingRelease, setIsReconcilingRelease] = useState(false);
+  const [reconcileError, setReconcileError] = useState<string | null>(null);
   const writesEnabled = WRITES_ENABLED;
 
   if (!isOpen) return null;
@@ -171,6 +188,19 @@ export const ContractPendingModal: React.FC<ContractPendingModalProps> = ({
               <strong className="text-on-surface font-semibold block">Design Preview Only — Chain Call Unavailable</strong>
               <p className="text-on-surface-variant leading-relaxed">
                 {unsuitableReason}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Pre-Broadcast Wallet Failure / Error Banner */}
+        {errorMessage && (
+          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-start gap-3 text-xs animate-fade-in">
+            <span className="material-symbols-outlined text-rose-600 text-lg shrink-0 mt-0.5">error</span>
+            <div className="space-y-1 flex-1">
+              <strong className="text-on-surface font-semibold block">Wallet / Pre-Broadcast Notification</strong>
+              <p className="text-on-surface-variant leading-relaxed">
+                {errorMessage}
               </p>
             </div>
           </div>
@@ -786,27 +816,202 @@ export const ContractPendingModal: React.FC<ContractPendingModalProps> = ({
           )}
         </div>
 
-        {/* Unresolved / In-Flight Duplicate Block Banner */}
+        {/* Unresolved / In-Flight Duplicate Block Banner & Explicit Reconciliation Flow */}
         {isDuplicateBlocked && (
-          <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/40 space-y-2 text-xs">
-            <div className="flex items-center gap-2 text-amber-700 font-semibold">
-              <span className="material-symbols-outlined text-sm">lock_clock</span>
-              <span>Pending / Unresolved Transaction Detected</span>
+          <div className="p-4 sm:p-5 rounded-xl bg-amber-500/10 border-2 border-amber-500/40 space-y-4 text-xs animate-fade-in">
+            <div className="flex items-center gap-2 text-amber-800 font-semibold text-sm">
+              <span className="material-symbols-outlined text-base text-amber-600">lock_clock</span>
+              <span>Unresolved Transaction Detected — Submission Blocked</span>
             </div>
-            <p className="text-on-surface-variant leading-relaxed text-[11px]">
-              {unresolvedMessage || 'A transaction for this action is already pending or unresolved on-chain. Resubmission is blocked to protect against duplicate execution.'}
+
+            <p className="text-on-surface-variant leading-relaxed text-xs">
+              {unresolvedMessage || 'A transaction for this action is already pending or unresolved on-chain. Resubmission is blocked to protect your funds and prevent duplicate transactions.'}
             </p>
-            {txId && (
-              <div className="flex items-center justify-between p-2 rounded bg-surface-container/60 font-mono text-[11px]">
-                <span className="text-on-surface-variant">Saved Tx ID:</span>
-                <span className="text-primary truncate max-w-[200px] sm:max-w-none">{txId}</span>
+
+            {txId ? (
+              <div className="flex flex-wrap items-center justify-between p-2.5 rounded-lg bg-surface-container font-mono text-[11px] border border-outline-variant/30 gap-2">
+                <span className="text-on-surface-variant">Saved Transaction ID:</span>
+                <span className="text-primary truncate font-bold">{txId}</span>
+                {explorerUrl && (
+                  <a
+                    href={explorerUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-secondary hover:underline shrink-0 flex items-center gap-1 font-sans text-xs font-semibold"
+                  >
+                    <span>Review on Explorer</span>
+                    <span className="material-symbols-outlined text-xs">open_in_new</span>
+                  </a>
+                )}
+              </div>
+            ) : (
+              <div className="p-2.5 rounded-lg bg-surface-container/80 text-[11px] text-amber-900 border border-amber-500/30 font-medium">
+                <span>Ambiguous submission with no returned transaction ID. A network disruption or wallet disconnect occurred after submission was initiated. Reconcile manually before attempting a new transaction.</span>
               </div>
             )}
-            {!txId && (
-              <div className="p-2 rounded bg-surface-container/60 text-[11px] text-amber-800">
-                <span>Ambiguous submission with no returned transaction ID. Reconcile manually before attempting a new transaction.</span>
+
+            {/* Explicit 4-Step User Reconciliation Flow */}
+            <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/30 space-y-3.5">
+              <div className="flex items-center justify-between">
+                <div className="font-semibold text-primary flex items-center gap-1.5 text-xs">
+                  <span className="material-symbols-outlined text-sm text-secondary">fact_check</span>
+                  <span>Explicit Reconciliation Flow</span>
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-surface-container font-medium text-on-surface-variant">
+                  Safety Protocol
+                </span>
               </div>
-            )}
+
+              <div className="space-y-3 text-xs text-on-surface-variant">
+                {/* Step 1: Wallet Activity */}
+                <div className="flex items-start gap-2.5">
+                  <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                    1
+                  </span>
+                  <div className="space-y-0.5 flex-1">
+                    <span className="font-semibold text-on-surface block">Check Wallet Activity</span>
+                    <p className="text-[11px] leading-relaxed">
+                      Open your wallet extension (e.g. MetaMask Activity tab) for address <code className="font-mono text-[10px] bg-surface-container px-1 rounded">{walletAddress || 'connected wallet'}</code>. Ensure no pending, queued, or unconfirmed transaction exists for this action.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Step 2: Explorer Evidence */}
+                <div className="flex items-start gap-2.5">
+                  <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                    2
+                  </span>
+                  <div className="space-y-0.5 flex-1">
+                    <span className="font-semibold text-on-surface block">Verify Explorer Activity</span>
+                    <p className="text-[11px] leading-relaxed">
+                      Confirm no transaction was broadcast from your account on the GenLayer Studio Explorer.
+                    </p>
+                    {walletAddress && (
+                      <a
+                        href={`https://explorer-studio-dev.genlayer.com/address/${walletAddress}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] text-secondary hover:underline font-semibold mt-1"
+                      >
+                        <span>Check Wallet on GenLayer Explorer</span>
+                        <span className="material-symbols-outlined text-xs">open_in_new</span>
+                      </a>
+                    )}
+                  </div>
+                </div>
+
+                {/* Step 3: Fresh Contract Read */}
+                <div className="flex items-start gap-2.5">
+                  <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                    3
+                  </span>
+                  <div className="space-y-2 flex-1">
+                    <span className="font-semibold text-on-surface block">Check Fresh Contract State</span>
+                    <p className="text-[11px] leading-relaxed">
+                      Query <code>get_credit(wallet)</code> and <code>get_withdrawn(wallet)</code> directly from the live contract to verify current balances.
+                    </p>
+                    {onReconcileCheckContract && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setIsCheckingContract(true);
+                          try {
+                            const res = await onReconcileCheckContract();
+                            setContractCheckResult(res);
+                          } catch (e: any) {
+                            setContractCheckResult({ creditWei: null, withdrawnWei: null, message: e?.message || 'Read failed' });
+                          } finally {
+                            setIsCheckingContract(false);
+                          }
+                        }}
+                        disabled={isCheckingContract}
+                        className="px-3 py-1.5 rounded-lg bg-surface-container text-primary text-xs font-semibold hover:bg-surface-container-high transition-colors flex items-center gap-1.5 border border-outline-variant/30 disabled:opacity-50 cursor-pointer"
+                      >
+                        <span className={`material-symbols-outlined text-xs ${isCheckingContract ? 'animate-spin' : ''}`}>
+                          {isCheckingContract ? 'refresh' : 'sync'}
+                        </span>
+                        <span>{isCheckingContract ? 'Reading Contract State...' : 'Query Live Contract'}</span>
+                      </button>
+                    )}
+
+                    {contractCheckResult && (
+                      <div className="p-2.5 rounded-lg bg-surface-container text-[11px] space-y-1 border border-outline-variant/20 font-mono">
+                        <div className="flex justify-between">
+                          <span className="text-on-surface-variant">Live get_credit:</span>
+                          <span className="text-primary font-bold">
+                            {contractCheckResult.creditWei !== null ? formatWeiAmount(contractCheckResult.creditWei) : 'Unavailable'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-on-surface-variant">Live genWithdrawn:</span>
+                          <span className="text-primary font-bold">
+                            {contractCheckResult.withdrawnWei !== null ? formatWeiAmount(contractCheckResult.withdrawnWei) : 'Unavailable'}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Strict safety invariant note about unchanged credit */}
+                    <div className="p-2.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-[11px] text-amber-900 space-y-1">
+                      <div className="flex items-center gap-1.5 font-semibold">
+                        <span className="material-symbols-outlined text-xs text-amber-700">shield</span>
+                        <span>Safety Invariant</span>
+                      </div>
+                      <p className="leading-tight">
+                        An unchanged credit balance alone (e.g. 10 GEN remaining) does <strong>not</strong> silently unlock a possibly pending transaction. If the transaction was successfully broadcast, it could still be processed by validators. You must confirm that your wallet activity shows no pending transaction.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Step 4: User Confirmation & Release */}
+                <div className="flex items-start gap-2.5 pt-2 border-t border-outline-variant/20">
+                  <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                    4
+                  </span>
+                  <div className="space-y-2 flex-1">
+                    <span className="font-semibold text-on-surface block">Confirm & Release Lock</span>
+                    <label className="flex items-start gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={walletActivityConfirmed}
+                        onChange={(e) => setWalletActivityConfirmed(e.target.checked)}
+                        className="mt-0.5 accent-primary"
+                      />
+                      <span className="text-[11px] text-on-surface leading-tight">
+                        I have checked my wallet activity and the GenLayer explorer, and confirmed that no transaction is pending or queued for this action.
+                      </span>
+                    </label>
+
+                    {onReconcileReleaseLock && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!walletActivityConfirmed) return;
+                          setIsReconcilingRelease(true);
+                          try {
+                            await onReconcileReleaseLock();
+                          } catch (e: any) {
+                            setReconcileError(e?.message || 'Failed to release lock');
+                          } finally {
+                            setIsReconcilingRelease(false);
+                          }
+                        }}
+                        disabled={!walletActivityConfirmed || isReconcilingRelease}
+                        className="w-full sm:w-auto px-4 py-2 rounded-lg bg-secondary text-on-secondary text-xs font-semibold hover:bg-secondary/90 transition-all flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm cursor-pointer"
+                      >
+                        <span className="material-symbols-outlined text-xs">lock_open</span>
+                        <span>{isReconcilingRelease ? 'Releasing Lock...' : 'Confirm Verification & Release Lock'}</span>
+                      </button>
+                    )}
+
+                    {reconcileError && (
+                      <p className="text-[11px] text-error font-medium">{reconcileError}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 

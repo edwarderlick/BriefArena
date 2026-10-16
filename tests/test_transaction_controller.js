@@ -1791,6 +1791,133 @@ async function runSuite() {
   console.log('✓ PASS: Actual observed Studio Next AgentPay receipt shape verified.\n');
   passedTests++;
 
+  // -------------------------------------------------------------
+  // Test 22: Pre-Broadcast Failure Classification & Ambiguous Reconciliation Flow
+  // -------------------------------------------------------------
+  console.log('[Test 22] Pre-Broadcast Failure Classification & Ambiguous Reconciliation Flow');
+  {
+    const { classifyWalletDispatchError, isProvenPreBroadcastWalletFailure } = await viteServer.ssrLoadModule('/src/services/transactionService.ts');
+
+    // 1. Classification Tests
+    // EIP-1193 rejection (code 4001)
+    const err4001 = { code: 4001, message: 'User rejected the request' };
+    assert.strictEqual(classifyWalletDispatchError(err4001).isPreBroadcastFailure, true);
+    assert.strictEqual(classifyWalletDispatchError(err4001).reason, 'user_rejection');
+    assert.strictEqual(isProvenPreBroadcastWalletFailure(err4001), true);
+
+    // MetaMask "Send failed" with no tx hash
+    const errSendFailed = new Error('MetaMask - RPC Error: Send failed');
+    assert.strictEqual(classifyWalletDispatchError(errSendFailed).isPreBroadcastFailure, true);
+    assert.strictEqual(classifyWalletDispatchError(errSendFailed).reason, 'wallet_send_failed');
+
+    // Wallet unauthorized (code 4100) and disconnected (code 4900)
+    assert.strictEqual(classifyWalletDispatchError({ code: 4100 }).isPreBroadcastFailure, true);
+    assert.strictEqual(classifyWalletDispatchError({ code: 4900 }).isPreBroadcastFailure, true);
+
+    // Ambiguous: network timeout without returned txId
+    const errTimeout = new Error('ETIMEDOUT: Connection dropped during broadcast');
+    assert.strictEqual(classifyWalletDispatchError(errTimeout).isPreBroadcastFailure, false);
+    assert.strictEqual(classifyWalletDispatchError(errTimeout).reason, 'ambiguous_broadcast');
+
+    // Ambiguous: error that returns a txId or hash
+    const errWithTx = { message: 'Network dropped', txId: '0x123456' };
+    assert.strictEqual(classifyWalletDispatchError(errWithTx).isPreBroadcastFailure, false);
+    assert.strictEqual(classifyWalletDispatchError(errWithTx).reason, 'ambiguous_broadcast');
+
+    // 2. Controller Pre-Broadcast Failure Behavior
+    const preBroadcastCtrl = new TransactionController({
+      actionType: 'withdraw',
+      walletState: {
+        isConnected: true,
+        address: '0x1111111111111111111111111111111111111111',
+        chainId: 61997,
+        isCorrectNetwork: true,
+      },
+      contractAddress: '0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9',
+      claimableCreditWei: 10000000000000000000n,
+    });
+    const preActionKey = preBroadcastCtrl.getActionKey();
+    clearPersistedTransaction(preActionKey);
+
+    const failingKit = {
+      estimate: async () => ({ success: true, userValue: 0n }),
+      submit: async () => {
+        throw new Error('MetaMask - RPC Error: Send failed');
+      },
+    };
+
+    await assert.rejects(
+      async () => preBroadcastCtrl.submit(failingKit),
+      err => err.code === 'DISPATCH_FAILED' && err.message.includes('Send failed')
+    );
+
+    const preState = preBroadcastCtrl.getState();
+    assert.strictEqual(preState.phase, 'error');
+    assert.strictEqual(preState.isDuplicateBlocked, false, 'Pre-broadcast failure must not block duplicate submission');
+    assert.strictEqual(preState.txId, null);
+    assert.ok(preState.errorMessage.includes('Send failed'));
+    assert.strictEqual(getPersistedTransaction(preActionKey), null, 'Must not persist ambiguous record for pre-broadcast failure');
+
+    // 3. Controller Genuinely Ambiguous Failure & Reconciliation Flow
+    const ambiguousCtrl = new TransactionController({
+      actionType: 'withdraw',
+      walletState: {
+        isConnected: true,
+        address: '0x1111111111111111111111111111111111111111',
+        chainId: 61997,
+        isCorrectNetwork: true,
+      },
+      contractAddress: '0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9',
+      claimableCreditWei: 10000000000000000000n,
+    });
+    const ambActionKey = ambiguousCtrl.getActionKey();
+    clearPersistedTransaction(ambActionKey);
+
+    const ambiguousKit = {
+      estimate: async () => ({ success: true, userValue: 0n }),
+      submit: async () => {
+        throw new Error('ETIMEDOUT: Unknown broadcast status');
+      },
+    };
+
+    await assert.rejects(
+      async () => ambiguousCtrl.submit(ambiguousKit),
+      err => err.code === 'DISPATCH_FAILED'
+    );
+
+    const ambState = ambiguousCtrl.getState();
+    assert.strictEqual(ambState.phase, 'unknown');
+    assert.strictEqual(ambState.isDuplicateBlocked, true, 'Ambiguous broadcast must block duplicate submission');
+    assert.ok(getPersistedTransaction(ambActionKey), 'Ambiguous record must be saved in storage');
+
+    // Invariant check: Unchanged credit alone must NOT silently unlock
+    const unverifiedOutcome = await ambiguousCtrl.reconcileAmbiguous({
+      walletActivityChecked: false,
+      noPendingTxInWallet: false,
+      currentLiveCreditWei: 10000000000000000000n, // Unchanged 10 GEN on-chain
+      currentLiveWithdrawnWei: 0n,
+    });
+    assert.strictEqual(unverifiedOutcome.resolved, false);
+    assert.strictEqual(unverifiedOutcome.outcome, 'unchanged_credit_still_blocked');
+    assert.strictEqual(ambiguousCtrl.getState().isDuplicateBlocked, true, 'Must remain blocked without wallet verification');
+
+    // Explicit user verification releases lock
+    const verifiedOutcome = await ambiguousCtrl.reconcileAmbiguous({
+      walletActivityChecked: true,
+      noPendingTxInWallet: true,
+      currentLiveCreditWei: 10000000000000000000n,
+      currentLiveWithdrawnWei: 0n,
+    });
+    assert.strictEqual(verifiedOutcome.resolved, true);
+    assert.strictEqual(verifiedOutcome.outcome, 'reconciled_and_unlocked');
+    assert.strictEqual(ambiguousCtrl.getState().isDuplicateBlocked, false, 'Lock must be released');
+    assert.strictEqual(ambiguousCtrl.getState().phase, 'idle');
+    assert.strictEqual(getPersistedTransaction(ambActionKey), null, 'Only that action lock is removed');
+
+    console.log('✓ PASS: Pre-broadcast failure classification and reconciliation flow verified.\n');
+    passedTests++;
+  }
+
   delete process.env.VITE_WRITES_ENABLED;
   viteServer.moduleGraph.invalidateAll();
   await viteServer.close();

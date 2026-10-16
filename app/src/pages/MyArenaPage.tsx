@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import type { SubmitInput, TransactionKit } from '@genlayer/transaction-kit';
 import { useWallet } from '../context/WalletContext';
 import { dataService } from '../services/dataService';
 import { buildWithdrawSubmitInput, WRITES_ENABLED } from '../services/transactionService';
-import { CONTRACT_ADDRESS } from '../services/contractClient';
+import { CONTRACT_ADDRESS, getContractCredit, getContractWithdrawn } from '../services/contractClient';
 import {
   useTransactionController,
   useTransactionKit,
@@ -74,6 +74,7 @@ export const MyArenaPage: React.FC<{ kit?: TransactionKit | null }> = ({
     state: controllerState,
     submit,
     estimateFee,
+    reconcileAmbiguous,
   } = useTransactionController(controllerParams, kit, async () => {
     if (address) {
       const overview = await dataService.getMyArenaOverview(address);
@@ -84,6 +85,44 @@ export const MyArenaPage: React.FC<{ kit?: TransactionKit | null }> = ({
       setMoneyState(overview.moneyState);
     }
   });
+
+  const handleReconcileCheckContract = useCallback(async () => {
+    if (!address || !CONTRACT_ADDRESS) {
+      return { creditWei: null, withdrawnWei: null, message: 'No wallet or contract address' };
+    }
+    try {
+      const [creditWei, withdrawnWei] = await Promise.all([
+        getContractCredit(CONTRACT_ADDRESS, address),
+        getContractWithdrawn(CONTRACT_ADDRESS, address),
+      ]);
+      return {
+        creditWei,
+        withdrawnWei,
+        message: `Live get_credit: ${creditWei} wei. Live get_withdrawn: ${withdrawnWei} wei.`,
+      };
+    } catch (err: any) {
+      return {
+        creditWei: null,
+        withdrawnWei: null,
+        message: err?.message || 'Failed reading live contract credit',
+      };
+    }
+  }, [address]);
+
+  const handleReconcileReleaseLock = useCallback(async () => {
+    await reconcileAmbiguous({
+      walletActivityChecked: true,
+      noPendingTxInWallet: true,
+    });
+    if (address) {
+      const overview = await dataService.getMyArenaOverview(address);
+      setContractAvailable(overview.contractDataAvailable);
+      setUnavailableReason(overview.reason);
+      setSponsoredChallenges(overview.sponsored || []);
+      setSubmittedEntries(overview.entered || []);
+      setMoneyState(overview.moneyState);
+    }
+  }, [reconcileAmbiguous, address]);
 
   const refundedChallenges = useMemo(() => {
     return (sponsoredChallenges || []).filter(c => c && c.status === 'canceled');
@@ -397,6 +436,35 @@ export const MyArenaPage: React.FC<{ kit?: TransactionKit | null }> = ({
                   <span className="text-[10px] text-primary-fixed-dim text-center leading-tight">
                     {withdrawDisabledReason || (writesEnabled ? "Live on-chain credit • Ready to withdraw" : "Live on-chain credit • Chain writes disabled")}
                   </span>
+                  {controllerState.isDuplicateBlocked && (
+                    <div className="p-2.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-[11px] text-on-primary space-y-1.5 mt-1">
+                      <div className="flex items-center gap-1.5 font-semibold text-secondary-fixed">
+                        <span className="material-symbols-outlined text-xs">lock_clock</span>
+                        <span>Ambiguous Withdrawal Blocked</span>
+                      </div>
+                      <p className="leading-tight text-primary-fixed-dim">
+                        A withdrawal transaction ended without definitive receipt. Reconcile with wallet activity and live contract before retrying.
+                      </p>
+                      <button
+                        type="button"
+                        id="reconcile-withdrawal-btn"
+                        onClick={() => {
+                          const draft = buildWithdrawSubmitInput();
+                          setWithdrawDraft(draft);
+                          setIsWithdrawModalOpen(true);
+                        }}
+                        className="w-full px-2.5 py-1 rounded bg-secondary-fixed text-on-secondary-fixed text-xs font-semibold hover:bg-secondary-fixed-dim transition-colors text-center cursor-pointer shadow-sm"
+                      >
+                        Review & Reconcile Withdrawal
+                      </button>
+                    </div>
+                  )}
+                  {controllerState.errorMessage && !controllerState.isDuplicateBlocked && (
+                    <div className="p-2 rounded bg-error-container/40 border border-error/30 text-[11px] text-error flex items-start gap-1.5 mt-1">
+                      <span className="material-symbols-outlined text-xs shrink-0 mt-0.5">info</span>
+                      <span>{controllerState.errorMessage}</span>
+                    </div>
+                  )}
                   {withdrawError && (
                     <div className="p-2 rounded bg-error-container text-on-error-container text-[11px]">
                       {withdrawError}
@@ -746,10 +814,14 @@ export const MyArenaPage: React.FC<{ kit?: TransactionKit | null }> = ({
           isSubmitting={controllerState.phase === 'submitting'}
           isDuplicateBlocked={controllerState.isDuplicateBlocked}
           unresolvedMessage={controllerState.unresolvedMessage}
+          errorMessage={controllerState.errorMessage}
+          walletAddress={address}
           onConfirmSubmit={async () => {
             await submit();
           }}
           onRetryEstimate={estimateFee}
+          onReconcileCheckContract={handleReconcileCheckContract}
+          onReconcileReleaseLock={handleReconcileReleaseLock}
           onClose={() => setIsWithdrawModalOpen(false)}
         />
       )}

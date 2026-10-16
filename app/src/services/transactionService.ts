@@ -1017,3 +1017,139 @@ export async function trackTransaction(
 ): Promise<TrackedStatus> {
   return kit.track(genlayerTxId, onUpdate, { until: trackUntil });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pre-Broadcast Wallet Failure vs. Ambiguous Broadcast Classification
+// ─────────────────────────────────────────────────────────────────────────────
+export interface WalletErrorClassification {
+  isPreBroadcastFailure: boolean;
+  reason:
+    | 'user_rejection'
+    | 'wallet_send_failed'
+    | 'wallet_unauthorized'
+    | 'wallet_disconnected'
+    | 'ambiguous_broadcast';
+  userMessage: string;
+}
+
+/**
+ * Distinguishes a proven pre-broadcast wallet failure / rejection from a genuinely
+ * ambiguous broadcast.
+ *
+ * Rules:
+ *   1. If any transaction ID was returned (genlayerTxId, txId, hash), the transaction
+ *      cannot be considered pre-broadcast; it is treated as an ambiguous broadcast.
+ *   2. If no transaction ID exists and the error indicates user rejection, cancellation,
+ *      or wallet failure before broadcast (e.g. MetaMask "Send failed", code 4001,
+ *      signature denied, insufficient gas pre-check), it is classified as a proven
+ *      pre-broadcast failure.
+ *   3. If the error occurs after dispatch initiation without definitive pre-broadcast proof
+ *      (e.g. timeout, dropped connection, network error), it is classified as ambiguous.
+ */
+export function classifyWalletDispatchError(err: unknown): WalletErrorClassification {
+  const returnedTxId =
+    (err as any)?.genlayerTxId ||
+    (err as any)?.txId ||
+    (err as any)?.hash ||
+    (err as any)?.cause?.genlayerTxId ||
+    (err as any)?.cause?.txId ||
+    (err as any)?.cause?.hash;
+
+  if (returnedTxId) {
+    return {
+      isPreBroadcastFailure: false,
+      reason: 'ambiguous_broadcast',
+      userMessage: `Transaction dispatch encountered an error for ID ${returnedTxId}. Status is ambiguous; duplicate submission is blocked. Verify receipt before retrying.`,
+    };
+  }
+
+  // Inspect error and up to 5 nested causes
+  const chain: any[] = [];
+  let curr: any = err;
+  while (curr && chain.length < 5) {
+    chain.push(curr);
+    curr = curr.cause || curr.error;
+  }
+
+  for (const item of chain) {
+    const code = item?.code ?? item?.error?.code ?? item?.cause?.code;
+    const rawMsg =
+      typeof item?.message === 'string'
+        ? item.message
+        : typeof item === 'string'
+        ? item
+        : '';
+    const msg = rawMsg.toLowerCase();
+
+    // 1. EIP-1193 User Rejection (code 4001 or standard user cancellation strings)
+    if (code === 4001 || code === 'ACTION_REJECTED' || code === 'USER_REJECTED') {
+      return {
+        isPreBroadcastFailure: true,
+        reason: 'user_rejection',
+        userMessage: 'Transaction signature was rejected in your wallet. Lock released; you can retry when ready.',
+      };
+    }
+
+    if (
+      msg.includes('user rejected') ||
+      msg.includes('user denied') ||
+      msg.includes('transaction was rejected') ||
+      msg.includes('rejected by user') ||
+      msg.includes('user cancelled') ||
+      msg.includes('user canceled') ||
+      msg.includes('action_rejected') ||
+      msg.includes('signature request denied') ||
+      msg.includes('user disapproved')
+    ) {
+      return {
+        isPreBroadcastFailure: true,
+        reason: 'user_rejection',
+        userMessage: 'Transaction signature was rejected in your wallet. Lock released; you can retry when ready.',
+      };
+    }
+
+    // 2. MetaMask / Wallet "Send failed" before broadcast with no transaction hash
+    if (
+      msg.includes('send failed') ||
+      msg.includes('failed to send') ||
+      msg.includes('failed to sign') ||
+      msg.includes('insufficient funds for gas') ||
+      msg.includes('cannot estimate gas')
+    ) {
+      return {
+        isPreBroadcastFailure: true,
+        reason: 'wallet_send_failed',
+        userMessage: `Wallet failed before broadcast (${rawMsg || 'Send failed'}). No on-chain transaction was submitted. Lock released for retry.`,
+      };
+    }
+
+    // 3. EIP-1193 pre-broadcast unauthorized / disconnected error codes
+    if (code === 4100) {
+      return {
+        isPreBroadcastFailure: true,
+        reason: 'wallet_unauthorized',
+        userMessage: 'Wallet is unauthorized or account is locked. No on-chain transaction was submitted. Lock released.',
+      };
+    }
+    if (code === 4900 || code === 4901) {
+      return {
+        isPreBroadcastFailure: true,
+        reason: 'wallet_disconnected',
+        userMessage: 'Wallet disconnected before transaction could be sent. Lock released.',
+      };
+    }
+  }
+
+  // Fallback: genuinely ambiguous broadcast (e.g. network timeout after dispatch, dropped connection)
+  const fallbackMsg = (err as Error)?.message || String(err);
+  return {
+    isPreBroadcastFailure: false,
+    reason: 'ambiguous_broadcast',
+    userMessage: `Ambiguous submission: Transaction dispatch encountered an error (${fallbackMsg}) before receiving a transaction ID. Resubmission is blocked to protect against duplicate execution. Please check your wallet or network activity and reconcile manually.`,
+  };
+}
+
+export function isProvenPreBroadcastWalletFailure(err: unknown): boolean {
+  return classifyWalletDispatchError(err).isPreBroadcastFailure;
+}
+
