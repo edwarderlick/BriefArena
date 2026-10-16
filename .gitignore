@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+app/node_modules/
+
+# Production build outputs
+dist/
+dist-ssr/
+app/dist/
+app/dist-ssr/
+
+# Environment files and secrets
+.env
+.env.*
+app/.env
+app/.env.*
+!.env.example
+!app/.env.example
+*.local
+
+# Python caches and test artifacts
+__pycache__/
+contracts/__pycache__/
+tests/__pycache__/
+scratch/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# GenLayer temporary build artifacts and scratch investigations
+artifacts/
+scratch/
+
+# Unused Stitch prototype exports
+briefarena_editorial_studio/
+briefarena_good_ideas_deserve_a_fair_finish/
+challenge_042_aether_os_briefarena/
+create_challenge_briefarena/
+decision_settlement_kanso_notebooks_briefarena/
+explore_challenges_briefarena/
+how_it_works_briefarena/
+my_arena_briefarena/
+submit_entry_aether_os_briefarena/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

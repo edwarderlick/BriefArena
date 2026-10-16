@@ -1,0 +1,70 @@
+{
+  "network": {
+    "chainId": 61997,
+    "name": "GenLayer Studio Next",
+    "rpcUrl": "https://studio-next.genlayer.com/api"
+  },
+  "withdrawReference": {
+    "parentTxHash": "0x063ea623194c0849c1ab8a89217458c84da37f5a05a2ef5636a032b1fb931736",
+    "childTxHash": "0x2bb58c62b1d0a90223c2661065227b4ccc01a213c0645a35434aff02b44e5163",
+    "contractSender": "0x754E97a763ed0Ae12da496A68d7a47090F3f1c2F",
+    "recipient": "0x9471C57aF9DF875d4D42EDb046e446E85D9CFE3A",
+    "amountWei": "5000000000000000"
+  },
+  "parentReceipt": {
+    "hash": "0x063ea623194c0849c1ab8a89217458c84da37f5a05a2ef5636a032b1fb931736",
+    "statusName": "FINALIZED",
+    "txExecutionResultName": "FINISHED_WITH_RETURN",
+    "successful": true,
+    "messages": [
+      {
+        "messageType": "0",
+        "recipient": "0x9471C57aF9DF875d4D42EDb046e446E85D9CFE3A",
+        "value": 5000000000000000
+      }
+    ],
+    "consensus_data": {
+      "final_votes": [
+        {
+          "mode": "LEADER",
+          "receipt": {
+            "messages": [
+              {
+                "is_eth_send": true,
+                "recipient": "0x9471C57aF9DF875d4D42EDb046e446E85D9CFE3A",
+                "amount": 5000000000000000
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "data": {
+      "active_message_generation": {
+        "occurrences": [
+          "0x2bb58c62b1d0a90223c2661065227b4ccc01a213c0645a35434aff02b44e5163"
+        ]
+      },
+      "message_effect_delivered": {
+        "0x2bb58c62b1d0a90223c2661065227b4ccc01a213c0645a35434aff02b44e5163": true
+      }
+    },
+    "triggered_transactions": []
+  },
+  "childReceipt": {
+    "hash": "0x2bb58c62b1d0a90223c2661065227b4ccc01a213c0645a35434aff02b44e5163",
+    "triggered_by": "0x063ea623194c0849c1ab8a89217458c84da37f5a05a2ef5636a032b1fb931736",
+    "from_address": "0x754E97a763ed0Ae12da496A68d7a47090F3f1c2F",
+    "to_address": "0x9471C57aF9DF875d4D42EDb046e446E85D9CFE3A",
+    "value": 5000000000000000,
+    "value_credited": true,
+    "statusName": "FINALIZED",
+    "txExecutionResultName": "NOT_VOTED",
+    "successful": true
+  },
+  "verificationNotes": [
+    "Native child transactions produced by contract send (AgentPay withdraw) exhibit statusName='FINALIZED' and txExecutionResultName='NOT_VOTED'.",
+    "Explicit value_credited === true is the defining proof of native GEN credit to recipient.",
+    "parent executionResultName='FINISHED_WITH_RETURN' alone is insufficient to confirm delivery without the matching child receipt and value_credited === true."
+  ]
+}
