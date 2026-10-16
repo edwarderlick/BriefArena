@@ -198,26 +198,34 @@ BriefArena/
 - **Node.js**: v20.19.0+ or v22.12.0+ (required by Vite 8)
 - **npm**: v9.0.0 or higher
 - **Python**: 3.10, 3.11, or 3.12 (for running Python contract tests)
+- **pip**: Python package manager
 - **Browser Wallet**: MetaMask, Rabby, or any EIP-1193 wallet configured for custom networks.
 
-### 1. Clone & Clean Install Dependencies
-Use `npm ci` for clean, deterministic installations matching the repository lockfiles:
+### 1. Clean Clone & Setup Command Sequence
+Run this single command sequence to clone, install all dependencies, run the test suites, and build the production bundle:
 ```bash
 # Clone the repository
 git clone https://github.com/edwarderlick/BriefArena.git
 cd BriefArena
 
+# Install Python contract test dependencies
+pip install -r requirements.txt
+
 # Clean install root dependencies
 npm ci
 
 # Clean install frontend dependencies
-cd app
-npm ci
-cd ..
+cd app && npm ci && cd ..
+
+# Run all contract and frontend tests
+npm test
+
+# Build the frontend production bundle
+cd app && npm run build && cd ..
 ```
 
-### 2. Configure Environment Variables
-Copy the example environment configuration into `app/.env`:
+### 2. Configure Environment Variables (Optional for Tests, Required for Dev)
+Integration tests include deterministic fallback addresses and do not require `.env` to execute. For local development, copy the example environment configuration into `app/.env`:
 ```bash
 cp app/.env.example app/.env
 ```
@@ -267,42 +275,45 @@ Visit `http://localhost:5180` in your browser.
 
 ## Running Tests
 
-BriefArena features comprehensive automated test coverage across both the Python Intelligent Contract and the TypeScript/React frontend.
+BriefArena features comprehensive automated test coverage across both the Python Intelligent Contract and the TypeScript/React frontend. All advertised test suites execute headlessly with zero external writes and zero reliance on private or local files.
 
-### Python Contract Tests
+### All Automated Tests
+To run the complete test suite:
+```bash
+npm test
+```
+*(Executes `npm run test:contract` followed by `npm run test:frontend`).*
+
+### Python Contract Tests (`npm run test:contract`)
 Run the in-memory GenLayer unit and simulation test suites:
 ```bash
+npm run test:contract
+# or directly:
 pytest tests/test_brief_arena.py tests/test_brief_arena_simulation.py -v
 ```
-*(All 77 contract tests pass in under 1 second without requiring an external node).*
+- **`tests/test_brief_arena.py`**: 71 in-memory contract unit tests covering constructor, challenge creation, entry submissions, deadlines, settlement, cancellations, and storage accounting.
+- **`tests/test_brief_arena_simulation.py`**: 6 simulation tests covering proxy calldata roundtripping, transfer emissions, and simulated recipient balances.
+- **Result**: Exactly **77 passed** in under 1 second without requiring an external node.
 
-### Frontend & Transaction Layer Tests
-Run the Node.js test suites covering the transaction service, state controller, provider integration, and rendered component interactions:
+### Frontend & Transaction Layer Tests (`npm run test:frontend`)
+Run the 6 Node.js test suites covering the transaction service, state controller, provider integration, and rendered component interactions:
 ```bash
-# Production path & Transaction Kit RC2 tests
-node tests/test_production_path_enabled.js
-
-# Production path withdrawal & child delivery verification
-node tests/test_production_path_withdraw.js
-
-# Typed transaction service payload & bounds tests
-node tests/test_transaction_service.js
-
-# Transaction controller state machine & reconciliation tests
-node tests/test_transaction_controller.js
-
-# Rendered component interaction tests
-node tests/test_frontend_integration.js
-
-# Isolated EIP-1193 provider tests
-node tests/test_isolated_provider_flow.js
-
-# Verification tooling & evidence validation
-node tests/test_verification_tooling.js
-
-# Studio Next RPC health check probe
-node tests/test_studio_health_check.js
+npm run test:frontend
 ```
+The frontend suite executes 6 tracked test files totaling **90 tests** (and 107 subtest assertions):
+1. **`tests/test_production_path_enabled.js`** (5 tests): Closed write gate, wrong chain rejection with mock wallet provider, missing contract address rejection, fee estimation failure, and full production path with real Transaction Kit RC2.
+2. **`tests/test_production_path_withdraw.js`** (5 tests): Closed write gate, wrong chain guard with mock wallet provider, zero credit prevention, full production withdrawal dispatch, and uncertain outcome tracking.
+3. **`tests/test_transaction_service.js`** (22 tests): Typed payload builders, exact 6-arg `create_challenge` calldata, relative duration conversions, floating-point-safe wei arithmetic, input boundary checks, and RC2 consensus outcome mapping.
+4. **`tests/test_transaction_controller.js`** (30 tests): Transaction controller state machine, precondition validation, fee estimation retry/error handling, duplicate submission locking, fail-closed reconciliation, and AgentPay child transfer proof verification.
+5. **`tests/test_frontend_integration.js`** (18 tests): Happy DOM rendered component flows for `CreateChallengePage`, `SubmitEntryPage`, `ChallengeDetailPage`, `MyArenaPage`, and `ContractPendingModal` under disabled and enabled build gates.
+6. **`tests/test_isolated_provider_flow.js`** (10 tests): Isolated EIP-1193 provider connection, wallet chain switching, tamper-resistance proofs, real Transaction Kit RC2 execution, and error handling.
+
+### Optional Verification Tooling
+The repository also includes optional diagnostic suites designed for developer environments:
+- **`tests/test_verification_tooling.js`**: Validates offline scenario runner & CLI tooling.
+- **`tests/test_studio_health_check.js`**: Diagnostic read-only probe for live GenLayer Studio Next RPC endpoints.
+
+*Note: In a clean clone without developer scratch scripts, these optional suites gracefully skip execution with exit code 0.*
 
 ---
 

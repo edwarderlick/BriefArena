@@ -1,13 +1,15 @@
 import pytest
 import sys
 import datetime as dt
+from pathlib import Path
 
-# Set up WASI mock for native GenLayer SDK testing
-from genvm_linter.validate.sdk_loader import setup_wasi_mocks
-setup_wasi_mocks()
+# Ensure repository root is on sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-sys.path.insert(0, r"C:\Users\samir\.cache\genvm-linter\extracted\genlayerlabs-genvm-manager-v0.6.0-rc9\py-lib-genlayer-std\z7fv8bqpetj3wnjd8sn5s5xfqve3rz8nmtq4npwf2qdvns57zjgg")
-sys.path.insert(0, r"d:\BriefArena")
+# Ensure portable GenLayer SDK and WASI mocks are loaded
+import tests.conftest  # noqa: F401
 
 import genlayer as gl
 from genlayer.storage import inmem_allocate

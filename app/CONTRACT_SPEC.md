@@ -1,6 +1,6 @@
 # BriefArena Contract Specification (CONTRACT_SPEC.md)
 
-See canonical root specification at [D:\BriefArena\CONTRACT_SPEC.md](file:///D:/BriefArena/CONTRACT_SPEC.md).
+See canonical root specification at [CONTRACT_SPEC.md](../CONTRACT_SPEC.md).
 
 - **Deployed Contract Address:** `0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9`
 - **Deployed Source SHA-256:** `41d7d841576d24c0bb74fb3a01451210ee47eba4cfba911d8398a38eaee6d8dc`

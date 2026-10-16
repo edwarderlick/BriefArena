@@ -3,6 +3,20 @@ const path = require('path');
 const assert = require('assert');
 const { execSync } = require('child_process');
 
+const requiredScratchScripts = [
+  path.resolve(__dirname, '../scratch/run_studio_verification.js'),
+  path.resolve(__dirname, '../scratch/verify_deployed_contract.js'),
+  path.resolve(__dirname, '../scratch/run_three_entrant_verification.js'),
+];
+
+if (!requiredScratchScripts.every(scriptPath => fs.existsSync(scriptPath))) {
+  console.log('================================================================');
+  console.log('BRIEFARENA VERIFICATION TOOLING SUITE (OPTIONAL)');
+  console.log('================================================================');
+  console.log('[OPTIONAL SUITE] Skipped: scratch verification scripts are optional developer tooling and are not present in a clean checkout.\n');
+  process.exit(0);
+}
+
 const {
   categorizeAndSanitizeError,
   saveRedactedErrorReport,

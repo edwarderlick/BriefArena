@@ -41,6 +41,10 @@ const assert = require('assert');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
+const DETERMINISTIC_TEST_CONTRACT_ADDRESS = '0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9';
+process.env.VITE_BRIEF_ARENA_CONTRACT_ADDRESS =
+  process.env.VITE_BRIEF_ARENA_CONTRACT_ADDRESS || DETERMINISTIC_TEST_CONTRACT_ADDRESS;
+
 // Setup Happy DOM environment
 const { GlobalWindow } = require(path.resolve(__dirname, '../app/node_modules/happy-dom'));
 const win = new GlobalWindow({ url: 'http://localhost:5173' });

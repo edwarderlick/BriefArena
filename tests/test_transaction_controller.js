@@ -31,6 +31,10 @@ const assert = require('assert');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
+const DETERMINISTIC_TEST_CONTRACT_ADDRESS = '0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9';
+process.env.VITE_BRIEF_ARENA_CONTRACT_ADDRESS =
+  process.env.VITE_BRIEF_ARENA_CONTRACT_ADDRESS || DETERMINISTIC_TEST_CONTRACT_ADDRESS;
+
 async function runSuite() {
   console.log('================================================================');
   console.log('BRIEFARENA TRANSACTION CONTROLLER TESTS');
@@ -71,7 +75,7 @@ async function runSuite() {
     isExecutionSuccessful,
   } = serviceModule;
 
-  const validContractAddress = '0x4072D26298eefD8c6D865164a6a3c14fa3E7e272';
+  const validContractAddress = DETERMINISTIC_TEST_CONTRACT_ADDRESS;
   const testWallet = '0x1E47d7d7079FE4aD599B184559ffCDC56278fb54';
 
   let passedTests = 0;

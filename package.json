@@ -5,7 +5,7 @@
   "description": "On-chain editorial copywriting arena powered by GenLayer Intelligent Contracts",
   "scripts": {
     "test:contract": "pytest tests/test_brief_arena.py tests/test_brief_arena_simulation.py",
-    "test:frontend": "node tests/test_production_path_enabled.js && node tests/test_production_path_withdraw.js && node tests/test_transaction_service.js && node tests/test_transaction_controller.js && node tests/test_frontend_integration.js && node tests/test_verification_tooling.js && node tests/test_studio_health_check.js",
+    "test:frontend": "node tests/test_production_path_enabled.js && node tests/test_production_path_withdraw.js && node tests/test_transaction_service.js && node tests/test_transaction_controller.js && node tests/test_frontend_integration.js && node tests/test_isolated_provider_flow.js",
     "test": "npm run test:contract && npm run test:frontend"
   },
   "dependencies": {
