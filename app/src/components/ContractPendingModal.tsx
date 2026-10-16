@@ -988,7 +988,12 @@ export const ContractPendingModal: React.FC<ContractPendingModalProps> = ({
                         type="button"
                         onClick={async () => {
                           if (!walletActivityConfirmed) return;
+                          if (Boolean(onReconcileCheckContract) && (!contractCheckResult || contractCheckResult.creditWei === null)) {
+                            setReconcileError('A successful fresh contract read (Step 3) is required before releasing the lock.');
+                            return;
+                          }
                           setIsReconcilingRelease(true);
+                          setReconcileError(null);
                           try {
                             await onReconcileReleaseLock();
                           } catch (e: any) {
@@ -997,12 +1002,22 @@ export const ContractPendingModal: React.FC<ContractPendingModalProps> = ({
                             setIsReconcilingRelease(false);
                           }
                         }}
-                        disabled={!walletActivityConfirmed || isReconcilingRelease}
+                        disabled={
+                          !walletActivityConfirmed ||
+                          isReconcilingRelease ||
+                          (Boolean(onReconcileCheckContract) && (!contractCheckResult || contractCheckResult.creditWei === null))
+                        }
                         className="w-full sm:w-auto px-4 py-2 rounded-lg bg-secondary text-on-secondary text-xs font-semibold hover:bg-secondary/90 transition-all flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm cursor-pointer"
                       >
                         <span className="material-symbols-outlined text-xs">lock_open</span>
                         <span>{isReconcilingRelease ? 'Releasing Lock...' : 'Confirm Verification & Release Lock'}</span>
                       </button>
+                    )}
+
+                    {Boolean(onReconcileCheckContract) && (!contractCheckResult || contractCheckResult.creditWei === null) && (
+                      <p className="text-[11px] text-amber-700 font-medium">
+                        Complete Step 3 (Query Live Contract) first to verify live on-chain credit before releasing the lock.
+                      </p>
                     )}
 
                     {reconcileError && (

@@ -1799,32 +1799,41 @@ async function runSuite() {
     const { classifyWalletDispatchError, isProvenPreBroadcastWalletFailure } = await viteServer.ssrLoadModule('/src/services/transactionService.ts');
 
     // 1. Classification Tests
-    // EIP-1193 rejection (code 4001)
+    // Clearly identified wallet signature rejection (code 4001 or user cancellation strings)
     const err4001 = { code: 4001, message: 'User rejected the request' };
     assert.strictEqual(classifyWalletDispatchError(err4001).isPreBroadcastFailure, true);
     assert.strictEqual(classifyWalletDispatchError(err4001).reason, 'user_rejection');
     assert.strictEqual(isProvenPreBroadcastWalletFailure(err4001), true);
 
-    // MetaMask "Send failed" with no tx hash
+    const errUserDenied = { message: 'MetaMask - RPC Error: User denied transaction signature.' };
+    assert.strictEqual(classifyWalletDispatchError(errUserDenied).isPreBroadcastFailure, true);
+    assert.strictEqual(classifyWalletDispatchError(errUserDenied).reason, 'user_rejection');
+
+    // Generic "Send failed" or "failed to send" with no tx hash MUST be kept ambiguous!
     const errSendFailed = new Error('MetaMask - RPC Error: Send failed');
-    assert.strictEqual(classifyWalletDispatchError(errSendFailed).isPreBroadcastFailure, true);
-    assert.strictEqual(classifyWalletDispatchError(errSendFailed).reason, 'wallet_send_failed');
+    assert.strictEqual(classifyWalletDispatchError(errSendFailed).isPreBroadcastFailure, false);
+    assert.strictEqual(classifyWalletDispatchError(errSendFailed).reason, 'ambiguous_broadcast');
 
-    // Wallet unauthorized (code 4100) and disconnected (code 4900)
-    assert.strictEqual(classifyWalletDispatchError({ code: 4100 }).isPreBroadcastFailure, true);
-    assert.strictEqual(classifyWalletDispatchError({ code: 4900 }).isPreBroadcastFailure, true);
+    const errFailedToSend = new Error('failed to send transaction to RPC node');
+    assert.strictEqual(classifyWalletDispatchError(errFailedToSend).isPreBroadcastFailure, false);
+    assert.strictEqual(classifyWalletDispatchError(errFailedToSend).reason, 'ambiguous_broadcast');
 
-    // Ambiguous: network timeout without returned txId
+    // Wallet disconnect (code 4900) or unauthorized (code 4100) MUST be kept ambiguous!
+    assert.strictEqual(classifyWalletDispatchError({ code: 4100 }).isPreBroadcastFailure, false);
+    assert.strictEqual(classifyWalletDispatchError({ code: 4900 }).isPreBroadcastFailure, false);
+
+    // Network timeout without returned txId
     const errTimeout = new Error('ETIMEDOUT: Connection dropped during broadcast');
     assert.strictEqual(classifyWalletDispatchError(errTimeout).isPreBroadcastFailure, false);
     assert.strictEqual(classifyWalletDispatchError(errTimeout).reason, 'ambiguous_broadcast');
 
-    // Ambiguous: error that returns a txId or hash
+    // Error that returns a txId or hash
     const errWithTx = { message: 'Network dropped', txId: '0x123456' };
     assert.strictEqual(classifyWalletDispatchError(errWithTx).isPreBroadcastFailure, false);
     assert.strictEqual(classifyWalletDispatchError(errWithTx).reason, 'ambiguous_broadcast');
 
-    // 2. Controller Pre-Broadcast Failure Behavior
+    // 2. Controller Pre-Broadcast Failure Behavior (Code 4001 vs Generic "Send failed")
+    // Case A: Code 4001 releases immediately
     const preBroadcastCtrl = new TransactionController({
       actionType: 'withdraw',
       walletState: {
@@ -1839,6 +1848,41 @@ async function runSuite() {
     const preActionKey = preBroadcastCtrl.getActionKey();
     clearPersistedTransaction(preActionKey);
 
+    const rejectingKit = {
+      estimate: async () => ({ success: true, userValue: 0n }),
+      submit: async () => {
+        const err = new Error('User rejected transaction signature');
+        err.code = 4001;
+        throw err;
+      },
+    };
+
+    await assert.rejects(
+      async () => preBroadcastCtrl.submit(rejectingKit),
+      err => err.code === 'DISPATCH_FAILED' && err.message.includes('rejected in your wallet')
+    );
+
+    const preState = preBroadcastCtrl.getState();
+    assert.strictEqual(preState.phase, 'error');
+    assert.strictEqual(preState.isDuplicateBlocked, false, 'Pre-broadcast failure (4001) must release duplicate submission block');
+    assert.strictEqual(preState.txId, null);
+    assert.strictEqual(getPersistedTransaction(preActionKey), null, 'Must not persist ambiguous record for pre-broadcast failure');
+
+    // Case B: Generic "Send failed" retains duplicate block
+    const sendFailedCtrl = new TransactionController({
+      actionType: 'withdraw',
+      walletState: {
+        isConnected: true,
+        address: '0x1111111111111111111111111111111111111111',
+        chainId: 61997,
+        isCorrectNetwork: true,
+      },
+      contractAddress: '0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9',
+      claimableCreditWei: 10000000000000000000n,
+    });
+    const sfActionKey = sendFailedCtrl.getActionKey();
+    clearPersistedTransaction(sfActionKey);
+
     const failingKit = {
       estimate: async () => ({ success: true, userValue: 0n }),
       submit: async () => {
@@ -1847,18 +1891,16 @@ async function runSuite() {
     };
 
     await assert.rejects(
-      async () => preBroadcastCtrl.submit(failingKit),
-      err => err.code === 'DISPATCH_FAILED' && err.message.includes('Send failed')
+      async () => sendFailedCtrl.submit(failingKit),
+      err => err.code === 'DISPATCH_FAILED' && err.message.includes('ambiguous broadcast status')
     );
 
-    const preState = preBroadcastCtrl.getState();
-    assert.strictEqual(preState.phase, 'error');
-    assert.strictEqual(preState.isDuplicateBlocked, false, 'Pre-broadcast failure must not block duplicate submission');
-    assert.strictEqual(preState.txId, null);
-    assert.ok(preState.errorMessage.includes('Send failed'));
-    assert.strictEqual(getPersistedTransaction(preActionKey), null, 'Must not persist ambiguous record for pre-broadcast failure');
+    const sfState = sendFailedCtrl.getState();
+    assert.strictEqual(sfState.phase, 'unknown');
+    assert.strictEqual(sfState.isDuplicateBlocked, true, 'Generic Send failed must retain duplicate block');
+    assert.ok(getPersistedTransaction(sfActionKey), 'Must persist ambiguous record for generic Send failed');
 
-    // 3. Controller Genuinely Ambiguous Failure & Reconciliation Flow
+    // 3. Ambiguous Reconciliation Flow & Edge Cases
     const ambiguousCtrl = new TransactionController({
       actionType: 'withdraw',
       walletState: {
@@ -1873,24 +1915,48 @@ async function runSuite() {
     const ambActionKey = ambiguousCtrl.getActionKey();
     clearPersistedTransaction(ambActionKey);
 
-    const ambiguousKit = {
-      estimate: async () => ({ success: true, userValue: 0n }),
-      submit: async () => {
-        throw new Error('ETIMEDOUT: Unknown broadcast status');
-      },
-    };
+    // Persist ambiguous withdrawal record
+    persistTransactionRecord({
+      txId: null,
+      actionKey: ambActionKey,
+      rpcUrl: 'https://studio-next.genlayer.com/api',
+      chainId: 61997,
+      contractAddress: '0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9',
+      walletAddress: '0x1111111111111111111111111111111111111111',
+      actionType: 'withdraw',
+      args: [],
+      userValueWei: '0',
+      claimableCreditWei: '10000000000000000000',
+      submittedAt: Date.now(),
+      status: 'ambiguous',
+    });
 
-    await assert.rejects(
-      async () => ambiguousCtrl.submit(ambiguousKit),
-      err => err.code === 'DISPATCH_FAILED'
-    );
+    // 3a. Failed fresh contract read: Must NOT release lock
+    const failedReadOutcome = await ambiguousCtrl.reconcileAmbiguous({
+      walletActivityChecked: true,
+      noPendingTxInWallet: true,
+      currentLiveCreditWei: null,
+    });
+    assert.strictEqual(failedReadOutcome.resolved, false);
+    assert.strictEqual(failedReadOutcome.outcome, 'contract_read_failed');
+    assert.strictEqual(ambiguousCtrl.getState().isDuplicateBlocked, true, 'Failed contract read must keep duplicate block');
 
-    const ambState = ambiguousCtrl.getState();
-    assert.strictEqual(ambState.phase, 'unknown');
-    assert.strictEqual(ambState.isDuplicateBlocked, true, 'Ambiguous broadcast must block duplicate submission');
-    assert.ok(getPersistedTransaction(ambActionKey), 'Ambiguous record must be saved in storage');
+    // 3b. Decreased credit without a receipt:
+    // Must NOT manufacture FINISHED_WITH_RETURN or claim withdrawal success!
+    // Must show "on-chain balance changed; transaction and GEN delivery need verification"
+    const decreasedCreditOutcome = await ambiguousCtrl.reconcileAmbiguous({
+      walletActivityChecked: true,
+      noPendingTxInWallet: true,
+      currentLiveCreditWei: 0n, // Decreased on-chain
+      currentLiveWithdrawnWei: 0n,
+    });
+    assert.strictEqual(decreasedCreditOutcome.resolved, false);
+    assert.strictEqual(decreasedCreditOutcome.outcome, 'balance_changed_unverified');
+    assert.ok(decreasedCreditOutcome.message.includes('On-chain balance changed; transaction and GEN delivery need verification'));
+    assert.strictEqual(ambiguousCtrl.getState().isDuplicateBlocked, true, 'Decreased credit without receipt must keep block');
+    assert.strictEqual(ambiguousCtrl.getState().childTransferStatus, 'unverified');
 
-    // Invariant check: Unchanged credit alone must NOT silently unlock
+    // 3c. Invariant check: Unchanged credit alone must NOT silently unlock
     const unverifiedOutcome = await ambiguousCtrl.reconcileAmbiguous({
       walletActivityChecked: false,
       noPendingTxInWallet: false,
@@ -1901,7 +1967,56 @@ async function runSuite() {
     assert.strictEqual(unverifiedOutcome.outcome, 'unchanged_credit_still_blocked');
     assert.strictEqual(ambiguousCtrl.getState().isDuplicateBlocked, true, 'Must remain blocked without wallet verification');
 
-    // Explicit user verification releases lock
+    // 3d. Legacy saved record without baseline credit (claimableCreditWei: null):
+    // Must handle as explicit user override with honest wording; never describe as verified failed transaction.
+    const legacyActionKey = 'withdraw:0xlegacy_ctrl:test';
+    persistTransactionRecord({
+      txId: null,
+      actionKey: legacyActionKey,
+      rpcUrl: 'https://studio-next.genlayer.com/api',
+      chainId: 61997,
+      contractAddress: '0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9',
+      walletAddress: '0x1111111111111111111111111111111111111111',
+      actionType: 'withdraw',
+      args: [],
+      userValueWei: '0',
+      claimableCreditWei: null, // Legacy record without baseline credit!
+      submittedAt: Date.now() - 3600000,
+      status: 'ambiguous',
+    });
+
+    const legacyCtrl = new TransactionController({
+      actionType: 'withdraw',
+      walletState: {
+        isConnected: true,
+        address: '0x1111111111111111111111111111111111111111',
+        chainId: 61997,
+        isCorrectNetwork: true,
+      },
+      contractAddress: '0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9',
+      claimableCreditWei: null,
+    });
+    legacyCtrl.actionKey = legacyActionKey;
+
+    const legacyOutcome = await legacyCtrl.reconcileAmbiguous({
+      walletActivityChecked: true,
+      noPendingTxInWallet: true,
+      currentLiveCreditWei: 10000000000000000000n,
+      currentLiveWithdrawnWei: 0n,
+    });
+    assert.strictEqual(legacyOutcome.resolved, true);
+    assert.strictEqual(legacyOutcome.outcome, 'legacy_override_unlocked');
+    assert.ok(
+      legacyOutcome.message.includes('explicit user override') || legacyOutcome.message.includes('Manual override'),
+      `Legacy message must honestly describe override: ${legacyOutcome.message}`
+    );
+    assert.ok(
+      !legacyOutcome.message.toLowerCase().includes('verified failed transaction'),
+      'Legacy message must NEVER describe it as a verified failed transaction'
+    );
+    assert.strictEqual(legacyCtrl.getState().isDuplicateBlocked, false, 'Legacy override must release lock');
+
+    // 3e. Normal verified release: credit intact and wallet activity confirmed
     const verifiedOutcome = await ambiguousCtrl.reconcileAmbiguous({
       walletActivityChecked: true,
       noPendingTxInWallet: true,
@@ -1914,7 +2029,7 @@ async function runSuite() {
     assert.strictEqual(ambiguousCtrl.getState().phase, 'idle');
     assert.strictEqual(getPersistedTransaction(ambActionKey), null, 'Only that action lock is removed');
 
-    console.log('✓ PASS: Pre-broadcast failure classification and reconciliation flow verified.\n');
+    console.log('✓ PASS: Generic Send failed, failed contract reads, decreased credit, legacy records, and error 4001 verified.\n');
     passedTests++;
   }
 

@@ -1023,28 +1023,22 @@ export async function trackTransaction(
 // ─────────────────────────────────────────────────────────────────────────────
 export interface WalletErrorClassification {
   isPreBroadcastFailure: boolean;
-  reason:
-    | 'user_rejection'
-    | 'wallet_send_failed'
-    | 'wallet_unauthorized'
-    | 'wallet_disconnected'
-    | 'ambiguous_broadcast';
+  reason: 'user_rejection' | 'ambiguous_broadcast';
   userMessage: string;
 }
 
 /**
- * Distinguishes a proven pre-broadcast wallet failure / rejection from a genuinely
- * ambiguous broadcast.
+ * Distinguishes a clearly proven pre-broadcast wallet signature rejection from a
+ * genuinely ambiguous broadcast.
  *
  * Rules:
  *   1. If any transaction ID was returned (genlayerTxId, txId, hash), the transaction
  *      cannot be considered pre-broadcast; it is treated as an ambiguous broadcast.
- *   2. If no transaction ID exists and the error indicates user rejection, cancellation,
- *      or wallet failure before broadcast (e.g. MetaMask "Send failed", code 4001,
- *      signature denied, insufficient gas pre-check), it is classified as a proven
- *      pre-broadcast failure.
- *   3. If the error occurs after dispatch initiation without definitive pre-broadcast proof
- *      (e.g. timeout, dropped connection, network error), it is classified as ambiguous.
+ *   2. Release immediately ONLY for a clearly identified wallet signature rejection before
+ *      dispatch, such as provider error 4001 or standard user cancellation messages.
+ *   3. Do NOT classify generic "Send failed", "failed to send", disconnection, or RPC errors
+ *      as proven pre-broadcast solely because no hash was returned; keep those cases ambiguous
+ *      to guard against duplicate execution if the transaction actually reached the network.
  */
 export function classifyWalletDispatchError(err: unknown): WalletErrorClassification {
   const returnedTxId =
@@ -1081,7 +1075,7 @@ export function classifyWalletDispatchError(err: unknown): WalletErrorClassifica
         : '';
     const msg = rawMsg.toLowerCase();
 
-    // 1. EIP-1193 User Rejection (code 4001 or standard user cancellation strings)
+    // Clearly identified wallet signature rejection (code 4001 or user cancellation strings)
     if (code === 4001 || code === 'ACTION_REJECTED' || code === 'USER_REJECTED') {
       return {
         isPreBroadcastFailure: true,
@@ -1107,40 +1101,10 @@ export function classifyWalletDispatchError(err: unknown): WalletErrorClassifica
         userMessage: 'Transaction signature was rejected in your wallet. Lock released; you can retry when ready.',
       };
     }
-
-    // 2. MetaMask / Wallet "Send failed" before broadcast with no transaction hash
-    if (
-      msg.includes('send failed') ||
-      msg.includes('failed to send') ||
-      msg.includes('failed to sign') ||
-      msg.includes('insufficient funds for gas') ||
-      msg.includes('cannot estimate gas')
-    ) {
-      return {
-        isPreBroadcastFailure: true,
-        reason: 'wallet_send_failed',
-        userMessage: `Wallet failed before broadcast (${rawMsg || 'Send failed'}). No on-chain transaction was submitted. Lock released for retry.`,
-      };
-    }
-
-    // 3. EIP-1193 pre-broadcast unauthorized / disconnected error codes
-    if (code === 4100) {
-      return {
-        isPreBroadcastFailure: true,
-        reason: 'wallet_unauthorized',
-        userMessage: 'Wallet is unauthorized or account is locked. No on-chain transaction was submitted. Lock released.',
-      };
-    }
-    if (code === 4900 || code === 4901) {
-      return {
-        isPreBroadcastFailure: true,
-        reason: 'wallet_disconnected',
-        userMessage: 'Wallet disconnected before transaction could be sent. Lock released.',
-      };
-    }
   }
 
-  // Fallback: genuinely ambiguous broadcast (e.g. network timeout after dispatch, dropped connection)
+  // Generic errors (e.g. "Send failed", "failed to send", disconnects, network timeouts, RPC errors):
+  // Do NOT classify as proven pre-broadcast solely because no hash was returned. Keep ambiguous!
   const fallbackMsg = (err as Error)?.message || String(err);
   return {
     isPreBroadcastFailure: false,

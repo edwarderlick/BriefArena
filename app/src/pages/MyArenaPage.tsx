@@ -110,10 +110,14 @@ export const MyArenaPage: React.FC<{ kit?: TransactionKit | null }> = ({
   }, [address]);
 
   const handleReconcileReleaseLock = useCallback(async () => {
-    await reconcileAmbiguous({
+    const outcome = await reconcileAmbiguous({
       walletActivityChecked: true,
       noPendingTxInWallet: true,
+      explorerChecked: true,
     });
+    if (outcome && !outcome.resolved) {
+      throw new Error(outcome.message);
+    }
     if (address) {
       const overview = await dataService.getMyArenaOverview(address);
       setContractAvailable(overview.contractDataAvailable);

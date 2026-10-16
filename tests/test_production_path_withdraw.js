@@ -638,11 +638,15 @@ async function runSuite() {
   // -------------------------------------------------------------
   // Subtest 6: Proven Pre-Broadcast Wallet Failure (MetaMask "Send failed" with no tx hash)
   // -------------------------------------------------------------
-  console.log('[Subtest 6] Proven Pre-Broadcast Failure: MetaMask "Send failed" with no hash releases lock and avoids permanent freeze');
+  // -------------------------------------------------------------
+  // Subtest 6: Proven Pre-Broadcast Wallet Failure (Error 4001) vs Ambiguous "Send failed"
+  // -------------------------------------------------------------
+  console.log('[Subtest 6] Error 4001 releases immediately; generic "Send failed" without hash stays ambiguous and blocks retry');
   {
     const controllerModule = await viteServer.ssrLoadModule('/src/services/transactionController.ts');
 
-    const testCtrl = new controllerModule.TransactionController({
+    // Case A: Clearly identified wallet signature rejection (provider error 4001)
+    const rejectCtrl = new controllerModule.TransactionController({
       actionType: 'withdraw',
       walletState: {
         isConnected: true,
@@ -653,66 +657,74 @@ async function runSuite() {
       contractAddress: briefArenaAddress,
       claimableCreditWei: 10000000000000000000n,
     });
+    const rejectActionKey = rejectCtrl.getActionKey();
+    controllerModule.clearPersistedTransaction(rejectActionKey);
 
-    const actionKey = testCtrl.getActionKey();
-    controllerModule.clearPersistedTransaction(actionKey);
-
-    // Mock TransactionKit where MetaMask records "Send failed" before broadcast
-    const failingKit = {
-      estimate: async () => ({
-        success: true,
-        userValue: 0n,
-        estimatedGas: 120000n,
-        suggestedMaxFee: 2000000000n,
-      }),
+    const rejectingKit = {
+      estimate: async () => ({ success: true, userValue: 0n }),
       submit: async () => {
-        // MetaMask "Send failed" before generating / broadcasting a transaction hash
-        const metaMaskError = new Error('MetaMask - RPC Error: Send failed');
-        metaMaskError.code = -32603;
-        throw metaMaskError;
+        const err = new Error('User rejected the request');
+        err.code = 4001;
+        throw err;
       },
     };
 
-    // Submitting must fail with DISPATCH_FAILED, but must NOT save an ambiguous lock
     await assert.rejects(
-      async () => testCtrl.submit(failingKit),
-      err => {
-        assert.strictEqual(err.code, 'DISPATCH_FAILED');
-        assert.ok(
-          err.message.includes('Send failed') || err.message.includes('Lock released'),
-          `Error message should indicate pre-broadcast failure: ${err.message}`
-        );
-        return true;
+      async () => rejectCtrl.submit(rejectingKit),
+      err => err.code === 'DISPATCH_FAILED' && err.message.includes('rejected in your wallet')
+    );
+
+    const rejectState = rejectCtrl.getState();
+    assert.strictEqual(rejectState.phase, 'error', 'Error 4001 phase must be error');
+    assert.strictEqual(rejectState.isDuplicateBlocked, false, 'Error 4001 must release duplicate block immediately');
+    assert.strictEqual(rejectState.txId, null);
+    assert.strictEqual(controllerModule.getPersistedTransaction(rejectActionKey), null, 'Must not persist record for error 4001');
+
+    // Case B: Generic "Send failed" without returned hash -> MUST stay ambiguous and block retry!
+    const sendFailedCtrl = new controllerModule.TransactionController({
+      actionType: 'withdraw',
+      walletState: {
+        isConnected: true,
+        address: winnerAccount,
+        chainId: 61997,
+        isCorrectNetwork: true,
       },
-      'Submit must reject with DISPATCH_FAILED indicating pre-broadcast wallet failure'
+      contractAddress: briefArenaAddress,
+      claimableCreditWei: 10000000000000000000n,
+    });
+    const sendFailedActionKey = sendFailedCtrl.getActionKey();
+    controllerModule.clearPersistedTransaction(sendFailedActionKey);
+
+    const sendFailedKit = {
+      estimate: async () => ({ success: true, userValue: 0n }),
+      submit: async () => {
+        throw new Error('MetaMask - RPC Error: Send failed');
+      },
+    };
+
+    await assert.rejects(
+      async () => sendFailedCtrl.submit(sendFailedKit),
+      err => err.code === 'DISPATCH_FAILED' && err.message.includes('ambiguous broadcast status')
     );
 
-    const state = testCtrl.getState();
-    assert.strictEqual(state.phase, 'error', 'Phase must be error for pre-broadcast failure');
-    assert.strictEqual(state.isDuplicateBlocked, false, 'Duplicate block must NOT be engaged for pre-broadcast failure');
-    assert.strictEqual(state.txId, null, 'No txId should be recorded');
-    assert.ok(state.errorMessage, 'User-facing error message must be set');
-    assert.ok(
-      state.errorMessage.includes('Send failed') || state.errorMessage.includes('Lock released'),
-      'Error message must reflect the wallet failure'
-    );
+    const sendFailedState = sendFailedCtrl.getState();
+    assert.strictEqual(sendFailedState.phase, 'unknown', 'Generic Send failed phase must be unknown');
+    assert.strictEqual(sendFailedState.isDuplicateBlocked, true, 'Generic Send failed must retain duplicate block');
+    assert.strictEqual(sendFailedState.txId, null, 'No txId should be recorded');
+    assert.ok(sendFailedState.unresolvedMessage.includes('Ambiguous submission'));
 
-    // Ensure no ambiguous transaction record was saved in storage
-    const persisted = controllerModule.getPersistedTransaction(actionKey);
-    assert.strictEqual(persisted, null, 'No transaction record should be persisted for pre-broadcast failure');
+    const persistedSendFailed = controllerModule.getPersistedTransaction(sendFailedActionKey);
+    assert.ok(persistedSendFailed, 'Ambiguous record must be persisted for generic Send failed');
+    assert.strictEqual(persistedSendFailed.status, 'ambiguous');
 
-    // Live contract balances are unchanged: 10 GEN credit, 0 GEN withdrawn
-    // Verify that a subsequent retry is NOT blocked by duplicate lock
-    assert.strictEqual(state.isDuplicateBlocked, false, 'Retry must remain immediately unblocked');
-
-    console.log('✓ PASS: Proven pre-broadcast failure releases action lock without saving ambiguous record.\n');
+    console.log('✓ PASS: Error 4001 releases immediately; generic "Send failed" without hash stays ambiguous and blocks retry.\n');
     passedTests++;
   }
 
   // -------------------------------------------------------------
-  // Subtest 7: Genuinely Ambiguous Broadcast & Reconciliation Flow
+  // Subtest 7: Genuinely Ambiguous Reconciliation: Edge Cases & Manual Release
   // -------------------------------------------------------------
-  console.log('[Subtest 7] Genuinely Ambiguous Broadcast: Keeps block; unchanged credit alone never unlocks; explicit reconciliation releases only that action lock');
+  console.log('[Subtest 7] Ambiguous Reconciliation: Failed contract reads, decreased credit without receipt, legacy records, and verified release');
   {
     const controllerModule = await viteServer.ssrLoadModule('/src/services/transactionController.ts');
 
@@ -731,79 +743,123 @@ async function runSuite() {
     const actionKey = ambiguousCtrl.getActionKey();
     controllerModule.clearPersistedTransaction(actionKey);
 
-    // Also persist an unrelated challenge creation transaction to ensure only the withdraw lock is released
-    const unrelatedActionKey = 'challenge_creation:0xother:999';
+    // Persist an ambiguous withdrawal transaction
     controllerModule.persistTransactionRecord({
-      txId: '0xotherhash999',
-      actionKey: unrelatedActionKey,
+      txId: null,
+      actionKey,
       rpcUrl: 'https://studio-next.genlayer.com/api',
       chainId: 61997,
       contractAddress: briefArenaAddress,
       walletAddress: winnerAccount,
-      actionType: 'challenge_creation',
+      actionType: 'withdraw',
       args: [],
-      userValueWei: '10000000000000000000',
+      userValueWei: '0',
+      claimableCreditWei: '10000000000000000000',
       submittedAt: Date.now(),
-      status: 'pending',
+      status: 'ambiguous',
     });
 
-    // Mock TransactionKit with network timeout during broadcast (genuinely ambiguous)
-    const ambiguousKit = {
-      estimate: async () => ({
-        success: true,
-        userValue: 0n,
-        estimatedGas: 120000n,
-        suggestedMaxFee: 2000000000n,
-      }),
-      submit: async () => {
-        throw new Error('ETIMEDOUT: Connection dropped during broadcast');
-      },
-    };
-
-    await assert.rejects(
-      async () => ambiguousCtrl.submit(ambiguousKit),
-      err => err.code === 'DISPATCH_FAILED',
-      'Submit must reject with DISPATCH_FAILED'
-    );
-
-    // Genuinely ambiguous failure must engage duplicate block and persist ambiguous record
-    const postSubmitState = ambiguousCtrl.getState();
-    assert.strictEqual(postSubmitState.isDuplicateBlocked, true, 'Ambiguous broadcast must block duplicate submission');
-    assert.strictEqual(postSubmitState.phase, 'unknown', 'Phase must be unknown');
-
-    const persisted = controllerModule.getPersistedTransaction(actionKey);
-    assert.ok(persisted, 'Ambiguous transaction record must be persisted');
-    assert.strictEqual(persisted.status, 'ambiguous', 'Status must be ambiguous');
-
-    // 1. Attempt reconciliation WITHOUT wallet activity confirmation (only checking credit)
-    // Live credit is still 10 GEN (unchanged)
-    const outcomeWithoutEvidence = await ambiguousCtrl.reconcileAmbiguous({
-      walletActivityChecked: false,
-      noPendingTxInWallet: false,
-    });
-
-    assert.strictEqual(outcomeWithoutEvidence.resolved, false, 'Unchanged credit alone must NOT resolve ambiguous transaction');
-    assert.strictEqual(outcomeWithoutEvidence.outcome, 'unchanged_credit_still_blocked', 'Must retain unchanged_credit_still_blocked outcome');
-    assert.strictEqual(ambiguousCtrl.getState().isDuplicateBlocked, true, 'Duplicate submission must remain blocked');
-
-    // 2. Perform explicit reconciliation flow with verified wallet activity & explorer evidence
-    const outcomeWithEvidence = await ambiguousCtrl.reconcileAmbiguous({
+    // 1. Failed fresh contract read: Must NOT release lock
+    const failedReadOutcome = await ambiguousCtrl.reconcileAmbiguous({
       walletActivityChecked: true,
       noPendingTxInWallet: true,
+      currentLiveCreditWei: null,
+    });
+    assert.strictEqual(failedReadOutcome.resolved, false, 'Failed contract read must not release lock');
+    assert.strictEqual(failedReadOutcome.outcome, 'contract_read_failed');
+    assert.strictEqual(ambiguousCtrl.getState().isDuplicateBlocked, true, 'Duplicate submission must remain blocked');
+
+    // 2. Decreased credit without a receipt:
+    // Must NOT manufacture FINISHED_WITH_RETURN or claim withdrawal success!
+    // Must show "on-chain balance changed; transaction and GEN delivery need verification"
+    const decreasedCreditOutcome = await ambiguousCtrl.reconcileAmbiguous({
+      walletActivityChecked: true,
+      noPendingTxInWallet: true,
+      currentLiveCreditWei: 0n, // Decreased from 10 GEN to 0 GEN
+      currentLiveWithdrawnWei: 0n,
+    });
+    assert.strictEqual(decreasedCreditOutcome.resolved, false, 'Decreased credit without receipt must NOT resolve to success');
+    assert.strictEqual(decreasedCreditOutcome.outcome, 'balance_changed_unverified');
+    assert.ok(
+      decreasedCreditOutcome.message.includes('On-chain balance changed; transaction and GEN delivery need verification'),
+      `Message must indicate unverified balance change: ${decreasedCreditOutcome.message}`
+    );
+    assert.strictEqual(ambiguousCtrl.getState().isDuplicateBlocked, true, 'Must remain blocked on unverified balance change');
+    assert.strictEqual(ambiguousCtrl.getState().childTransferStatus, 'unverified', 'Child transfer status must be unverified');
+
+    // 3. Unchanged credit without wallet confirmation:
+    const unconfirmedOutcome = await ambiguousCtrl.reconcileAmbiguous({
+      walletActivityChecked: false,
+      noPendingTxInWallet: false,
+      currentLiveCreditWei: 10000000000000000000n,
+      currentLiveWithdrawnWei: 0n,
+    });
+    assert.strictEqual(unconfirmedOutcome.resolved, false, 'Unchanged credit without wallet confirmation must not resolve');
+    assert.strictEqual(unconfirmedOutcome.outcome, 'unchanged_credit_still_blocked');
+
+    // 4. Older saved record with no baseline credit (savedCredit === null):
+    // Must handle as explicit user override with honest wording; never describe as verified failed transaction.
+    const legacyActionKey = 'withdraw:0xlegacy:test';
+    controllerModule.persistTransactionRecord({
+      txId: null,
+      actionKey: legacyActionKey,
+      rpcUrl: 'https://studio-next.genlayer.com/api',
+      chainId: 61997,
+      contractAddress: briefArenaAddress,
+      walletAddress: winnerAccount,
+      actionType: 'withdraw',
+      args: [],
+      userValueWei: '0',
+      claimableCreditWei: null, // Legacy record with no baseline credit!
+      submittedAt: Date.now() - 3600000,
+      status: 'ambiguous',
     });
 
-    assert.strictEqual(outcomeWithEvidence.resolved, true, 'Reconciliation must resolve when evidence is provided');
-    assert.strictEqual(outcomeWithEvidence.outcome, 'reconciled_and_unlocked', 'Outcome must be reconciled_and_unlocked');
+    const legacyCtrl = new controllerModule.TransactionController({
+      actionType: 'withdraw',
+      walletState: {
+        isConnected: true,
+        address: winnerAccount,
+        chainId: 61997,
+        isCorrectNetwork: true,
+      },
+      contractAddress: briefArenaAddress,
+      claimableCreditWei: null,
+    });
+    // Set matching actionKey
+    legacyCtrl.actionKey = legacyActionKey;
+
+    const legacyOutcome = await legacyCtrl.reconcileAmbiguous({
+      walletActivityChecked: true,
+      noPendingTxInWallet: true,
+      currentLiveCreditWei: 10000000000000000000n,
+      currentLiveWithdrawnWei: 0n,
+    });
+    assert.strictEqual(legacyOutcome.resolved, true, 'Legacy record with confirmed evidence must resolve');
+    assert.strictEqual(legacyOutcome.outcome, 'legacy_override_unlocked');
+    assert.ok(
+      legacyOutcome.message.includes('explicit user override') || legacyOutcome.message.includes('Manual override'),
+      `Legacy message must use honest user override wording: ${legacyOutcome.message}`
+    );
+    assert.ok(
+      !legacyOutcome.message.toLowerCase().includes('verified failed transaction'),
+      'Legacy message must NEVER describe it as a verified failed transaction'
+    );
+    assert.strictEqual(legacyCtrl.getState().isDuplicateBlocked, false, 'Legacy override must release action lock');
+
+    // 5. Normal verified release: live credit intact (10 GEN) and wallet activity confirmed
+    const verifiedOutcome = await ambiguousCtrl.reconcileAmbiguous({
+      walletActivityChecked: true,
+      noPendingTxInWallet: true,
+      currentLiveCreditWei: 10000000000000000000n,
+      currentLiveWithdrawnWei: 0n,
+    });
+    assert.strictEqual(verifiedOutcome.resolved, true, 'Verified reconciliation must resolve');
+    assert.strictEqual(verifiedOutcome.outcome, 'reconciled_and_unlocked');
     assert.strictEqual(ambiguousCtrl.getState().isDuplicateBlocked, false, 'Action lock must be released');
-    assert.strictEqual(ambiguousCtrl.getState().phase, 'idle', 'Phase must return to idle');
+    assert.strictEqual(controllerModule.getPersistedTransaction(actionKey), null, 'Persisted record must be cleared');
 
-    // Ensure ONLY that action's lock was cleared
-    assert.strictEqual(controllerModule.getPersistedTransaction(actionKey), null, 'Target action lock must be cleared');
-    const remainingUnrelated = controllerModule.getPersistedTransaction(unrelatedActionKey);
-    assert.ok(remainingUnrelated, 'Unrelated transaction record must NOT be cleared');
-    controllerModule.clearPersistedTransaction(unrelatedActionKey);
-
-    console.log('✓ PASS: Genuinely ambiguous broadcast retains duplicate block until explicit user reconciliation verifies wallet activity and live contract state.\n');
+    console.log('✓ PASS: Failed contract reads, decreased credit, legacy override, and normal verified release all adhere to safety invariants.\n');
     passedTests++;
   }
 

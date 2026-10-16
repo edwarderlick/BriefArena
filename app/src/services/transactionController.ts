@@ -223,7 +223,10 @@ export interface ReconciliationOutcome {
     | 'confirmed_success'
     | 'confirmed_failed'
     | 'unchanged_credit_still_blocked'
-    | 'reconciled_and_unlocked';
+    | 'reconciled_and_unlocked'
+    | 'balance_changed_unverified'
+    | 'contract_read_failed'
+    | 'legacy_override_unlocked';
   creditRemainingWei?: bigint | null;
   genWithdrawnWei?: bigint | null;
   message: string;
@@ -1072,35 +1075,76 @@ export class TransactionController {
         const resolvedWallet = this.params.walletState.address || existing.walletAddress;
 
         if (resolvedAddr && resolvedWallet) {
-          try {
-            [liveCreditWei, liveWithdrawnWei] = await Promise.all([
-              getContractCredit(resolvedAddr as Address, resolvedWallet),
-              getContractWithdrawn(resolvedAddr as Address, resolvedWallet),
-            ]);
-          } catch (readErr) {
-            console.warn('Failed reading live contract credit during reconciliation:', readErr);
+          if (clientOrKit && typeof clientOrKit.readContract === 'function') {
+            try {
+              const [c, w] = await Promise.all([
+                clientOrKit.readContract({
+                  address: resolvedAddr,
+                  functionName: 'get_credit',
+                  args: [toCalldataAddress(resolvedWallet)],
+                }),
+                clientOrKit.readContract({
+                  address: resolvedAddr,
+                  functionName: 'get_withdrawn',
+                  args: [toCalldataAddress(resolvedWallet)],
+                }),
+              ]);
+              liveCreditWei = BigInt(c || 0);
+              liveWithdrawnWei = BigInt(w || 0);
+            } catch (readErr) {
+              console.warn('Custom client readContract error in reconcile:', readErr);
+            }
+          }
+          if (liveCreditWei === null) {
+            try {
+              [liveCreditWei, liveWithdrawnWei] = await Promise.all([
+                getContractCredit(resolvedAddr as Address, resolvedWallet),
+                getContractWithdrawn(resolvedAddr as Address, resolvedWallet),
+              ]);
+            } catch (readErr) {
+              console.warn('Failed reading live contract credit during reconciliation:', readErr);
+            }
           }
         }
         void liveWithdrawnWei;
 
         const savedCredit = existing.claimableCreditWei ? BigInt(existing.claimableCreditWei) : null;
 
-        // 1. Confirmed success: credit decreased on-chain
-        if (liveCreditWei !== null && savedCredit !== null && savedCredit > 0n && liveCreditWei < savedCredit) {
-          existing.status = 'success';
-          existing.executionResultName = 'FINISHED_WITH_RETURN';
-          this.state.phase = 'success';
-          this.state.isDuplicateBlocked = false;
-          this.state.unresolvedMessage = null;
-          persistTransactionRecord(existing);
-          await this.triggerStateRefresh();
+        // 1. Require a successful fresh contract read before no-hash lock release
+        if (liveCreditWei === null) {
+          this.state.isDuplicateBlocked = true;
+          this.state.phase = 'unknown';
+          this.state.txId = null;
+          this.state.explorerLink = null;
+          this.state.unresolvedMessage =
+            'Ambiguous submission with no returned transaction ID. Fresh contract read failed or unavailable. Retaining duplicate submission block.';
           this.notify();
           return existing;
         }
 
-        // 2. Unchanged credit:
-        // An unchanged credit balance alone must NOT silently unlock a possibly pending transaction.
+        // 2. Decreased credit without a receipt:
+        // In both reconciliation paths in transactionController.ts, do not manufacture FINISHED_WITH_RETURN
+        // or claim withdrawal success just because credit decreased. Show "on-chain balance changed;
+        // transaction and GEN delivery need verification" until appropriate receipt evidence exists.
+        if (savedCredit !== null && savedCredit > 0n && liveCreditWei < savedCredit) {
+          existing.status = 'ambiguous';
+          const msg = 'On-chain balance changed; transaction and GEN delivery need verification.';
+          existing.errorMessage = msg;
+          this.state.isDuplicateBlocked = true;
+          this.state.phase = 'unknown';
+          this.state.childTransferStatus = 'unverified';
+          this.state.txId = null;
+          this.state.explorerLink = null;
+          this.state.unresolvedMessage = msg;
+          persistTransactionRecord(existing);
+          this.notify();
+          return existing;
+        }
+
+        // 3. User confirmed wallet & explorer activity:
         if (evidence?.noPendingTxInWallet === true && evidence?.walletActivityChecked === true) {
+          // If an older saved record has no baseline credit, handle it as an explicit user override
+          // with honest wording; never describe it as a verified failed transaction.
           clearPersistedTransaction(this.actionKey);
           this.state.isDuplicateBlocked = false;
           this.state.phase = 'idle';
@@ -1110,6 +1154,7 @@ export class TransactionController {
           return null;
         }
 
+        // 4. Retain block
         this.state.isDuplicateBlocked = true;
         this.state.phase = 'unknown';
         this.state.txId = null;
@@ -1260,7 +1305,7 @@ export class TransactionController {
       const resolvedAddr = this.params.contractAddress || CONTRACT_ADDRESS;
       const resolvedWallet = this.params.walletState.address || existing.walletAddress;
 
-      if (liveCreditWei === null && resolvedAddr && resolvedWallet) {
+      if (evidence?.currentLiveCreditWei === undefined && resolvedAddr && resolvedWallet) {
         if (clientOrKit && typeof clientOrKit.readContract === 'function') {
           try {
             const [c, w] = await Promise.all([
@@ -1292,36 +1337,59 @@ export class TransactionController {
         }
       }
 
-      const savedCredit = existing.claimableCreditWei ? BigInt(existing.claimableCreditWei) : null;
-
-      // 1. Confirmed success: credit decreased on-chain
-      if (liveCreditWei !== null && savedCredit !== null && savedCredit > 0n && liveCreditWei < savedCredit) {
-        existing.status = 'success';
-        existing.executionResultName = 'FINISHED_WITH_RETURN';
-        this.state.phase = 'success';
-        this.state.isDuplicateBlocked = false;
-        this.state.unresolvedMessage = null;
-        persistTransactionRecord(existing);
-        await this.triggerStateRefresh();
+      // 1. Require a successful fresh contract read before the manual no-hash lock release
+      if (liveCreditWei === null) {
+        this.state.isDuplicateBlocked = true;
+        this.state.phase = 'unknown';
+        const msg = 'Fresh contract read failed or unavailable. A successful fresh contract read is required before releasing the lock.';
+        this.state.unresolvedMessage = msg;
         this.notify();
         return {
           actionKey: this.actionKey,
           actionType: 'withdraw',
-          resolved: true,
-          outcome: 'confirmed_success',
-          creditRemainingWei: liveCreditWei,
-          genWithdrawnWei: liveWithdrawnWei,
-          message: 'Confirmed on-chain: internal credit was deducted. Withdrawal succeeded.',
+          resolved: false,
+          outcome: 'contract_read_failed',
+          creditRemainingWei: null,
+          genWithdrawnWei: null,
+          message: msg,
         };
       }
 
-      // 2. Unchanged credit:
+      const savedCredit = existing.claimableCreditWei ? BigInt(existing.claimableCreditWei) : null;
+
+      // 2. Decreased credit without a receipt:
+      // In both reconciliation paths in transactionController.ts, do not manufacture FINISHED_WITH_RETURN
+      // or claim withdrawal success just because credit decreased. Show "on-chain balance changed;
+      // transaction and GEN delivery need verification" until appropriate receipt evidence exists.
+      if (savedCredit !== null && savedCredit > 0n && liveCreditWei < savedCredit) {
+        const msg = 'On-chain balance changed; transaction and GEN delivery need verification.';
+        existing.status = 'ambiguous';
+        existing.errorMessage = msg;
+        this.state.isDuplicateBlocked = true;
+        this.state.phase = 'unknown';
+        this.state.childTransferStatus = 'unverified';
+        this.state.unresolvedMessage = msg;
+        persistTransactionRecord(existing);
+        this.notify();
+        return {
+          actionKey: this.actionKey,
+          actionType: 'withdraw',
+          resolved: false,
+          outcome: 'balance_changed_unverified',
+          creditRemainingWei: liveCreditWei,
+          genWithdrawnWei: liveWithdrawnWei,
+          message: msg,
+        };
+      }
+
+      // 3. Keep the wallet and explorer confirmation:
       // An unchanged credit balance alone must NOT silently unlock a possibly pending transaction.
       if (!evidence?.walletActivityChecked || !evidence?.noPendingTxInWallet) {
         this.state.isDuplicateBlocked = true;
         this.state.phase = 'unknown';
-        const amtStr = liveCreditWei !== null ? `${(Number(liveCreditWei) / 1e18).toFixed(2)} test GEN` : 'unknown';
-        this.state.unresolvedMessage = `Live contract credit is unchanged (${amtStr} remaining). An unchanged credit balance alone does not prove a broadcasted transaction will not execute. Confirm in wallet activity that no transaction is pending.`;
+        const amtStr = `${(Number(liveCreditWei) / 1e18).toFixed(2)} test GEN`;
+        const msg = `Live contract credit is unchanged (${amtStr} remaining). An unchanged credit balance alone does not prove a broadcasted transaction will not execute. Confirm in wallet activity that no transaction is pending.`;
+        this.state.unresolvedMessage = msg;
         this.notify();
         return {
           actionKey: this.actionKey,
@@ -1330,12 +1398,32 @@ export class TransactionController {
           outcome: 'unchanged_credit_still_blocked',
           creditRemainingWei: liveCreditWei,
           genWithdrawnWei: liveWithdrawnWei,
-          message: this.state.unresolvedMessage,
+          message: msg,
         };
       }
 
-      // 3. User explicitly confirmed wallet activity has no pending transaction AND live credit verified intact:
-      // Release ONLY that action's lock!
+      // 4. Older saved record has no baseline credit:
+      // Handle it as an explicit user override with honest wording; never describe it as a verified failed transaction.
+      if (savedCredit === null) {
+        clearPersistedTransaction(this.actionKey);
+        this.state.isDuplicateBlocked = false;
+        this.state.phase = 'idle';
+        this.state.unresolvedMessage = null;
+        this.state.errorMessage = null;
+        this.notify();
+        const amtStr = `${(Number(liveCreditWei) / 1e18).toFixed(2)} test GEN`;
+        return {
+          actionKey: this.actionKey,
+          actionType: 'withdraw',
+          resolved: true,
+          outcome: 'legacy_override_unlocked',
+          creditRemainingWei: liveCreditWei,
+          genWithdrawnWei: liveWithdrawnWei,
+          message: `Manual override: older saved record had no baseline credit recorded. Verified wallet activity and live contract balance (${amtStr} remaining); lock released by explicit user override.`,
+        };
+      }
+
+      // 5. Normal verified release: live credit intact (>= savedCredit) and wallet activity confirmed no pending tx
       clearPersistedTransaction(this.actionKey);
       this.state.isDuplicateBlocked = false;
       this.state.phase = 'idle';
@@ -2205,10 +2293,10 @@ export function useTransactionController(
   );
 
   const reconcileAmbiguous = useCallback(
-    async (evidence?: ReconciliationEvidence) => {
-      return controllerRef.current?.reconcileAmbiguous(evidence);
+    async (evidence?: ReconciliationEvidence, client?: any) => {
+      return controllerRef.current?.reconcileAmbiguous(evidence, client || kit || readOnlyClient);
     },
-    []
+    [kit]
   );
 
   const reset = useCallback((options?: { force?: boolean }) => {
