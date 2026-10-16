@@ -202,14 +202,11 @@ BriefArena/
 - **Browser Wallet**: MetaMask, Rabby, or any EIP-1193 wallet configured for custom networks.
 
 ### 1. Clean Clone & Setup Command Sequence
-Run this single command sequence to clone, install all dependencies, run the test suites, and build the production bundle:
+Run this single command sequence to clone, install dependencies, run the automated test suite, and build the production bundle:
 ```bash
 # Clone the repository
 git clone https://github.com/edwarderlick/BriefArena.git
 cd BriefArena
-
-# Install Python contract test dependencies
-pip install -r requirements.txt
 
 # Clean install root dependencies
 npm ci
@@ -217,7 +214,7 @@ npm ci
 # Clean install frontend dependencies
 cd app && npm ci && cd ..
 
-# Run all contract and frontend tests
+# Run the automated frontend test suites
 npm test
 
 # Build the frontend production bundle
@@ -275,38 +272,54 @@ Visit `http://localhost:5180` in your browser.
 
 ## Running Tests
 
-BriefArena features comprehensive automated test coverage across both the Python Intelligent Contract and the TypeScript/React frontend. All advertised test suites execute headlessly with zero external writes and zero reliance on private or local files.
+BriefArena features comprehensive automated test coverage across both the TypeScript/React frontend and the Python Intelligent Contract.
 
-### All Automated Tests
-To run the complete test suite:
+### Reproducible Frontend & Integration Tests (`npm test`)
+The default `npm test` command executes the **6 Node.js test suites** covering the production transaction path, withdrawal lifecycle, state machine, provider integration, and rendered component interactions with zero external node or runtime prerequisites:
 ```bash
 npm test
-```
-*(Executes `npm run test:contract` followed by `npm run test:frontend`).*
-
-### Python Contract Tests (`npm run test:contract`)
-Run the in-memory GenLayer unit and simulation test suites:
-```bash
-npm run test:contract
-# or directly:
-pytest tests/test_brief_arena.py tests/test_brief_arena_simulation.py -v
-```
-- **`tests/test_brief_arena.py`**: 71 in-memory contract unit tests covering constructor, challenge creation, entry submissions, deadlines, settlement, cancellations, and storage accounting.
-- **`tests/test_brief_arena_simulation.py`**: 6 simulation tests covering proxy calldata roundtripping, transfer emissions, and simulated recipient balances.
-- **Result**: Exactly **77 passed** in under 1 second without requiring an external node.
-
-### Frontend & Transaction Layer Tests (`npm run test:frontend`)
-Run the 6 Node.js test suites covering the transaction service, state controller, provider integration, and rendered component interactions:
-```bash
+# or equivalently:
 npm run test:frontend
 ```
-The frontend suite executes 6 tracked test files totaling **90 tests** (and 107 subtest assertions):
+The frontend test suite executes 6 tracked test files totaling **90 tests** (and 107 subtest assertions):
 1. **`tests/test_production_path_enabled.js`** (5 tests): Closed write gate, wrong chain rejection with mock wallet provider, missing contract address rejection, fee estimation failure, and full production path with real Transaction Kit RC2.
 2. **`tests/test_production_path_withdraw.js`** (5 tests): Closed write gate, wrong chain guard with mock wallet provider, zero credit prevention, full production withdrawal dispatch, and uncertain outcome tracking.
 3. **`tests/test_transaction_service.js`** (22 tests): Typed payload builders, exact 6-arg `create_challenge` calldata, relative duration conversions, floating-point-safe wei arithmetic, input boundary checks, and RC2 consensus outcome mapping.
 4. **`tests/test_transaction_controller.js`** (30 tests): Transaction controller state machine, precondition validation, fee estimation retry/error handling, duplicate submission locking, fail-closed reconciliation, and AgentPay child transfer proof verification.
 5. **`tests/test_frontend_integration.js`** (18 tests): Happy DOM rendered component flows for `CreateChallengePage`, `SubmitEntryPage`, `ChallengeDetailPage`, `MyArenaPage`, and `ContractPendingModal` under disabled and enabled build gates.
 6. **`tests/test_isolated_provider_flow.js`** (10 tests): Isolated EIP-1193 provider connection, wallet chain switching, tamper-resistance proofs, real Transaction Kit RC2 execution, and error handling.
+
+### Python Contract Tests (`npm run test:contract`)
+The repository includes 77 Python contract tests covering the Intelligent Contract logic in-memory:
+- **`tests/test_brief_arena.py`**: 71 in-memory contract unit tests covering constructor, challenge creation, entry submissions, deadlines, settlement, cancellations, and storage accounting.
+- **`tests/test_brief_arena_simulation.py`**: 6 simulation tests covering proxy calldata roundtripping, transfer emissions, and simulated recipient balances.
+- **Result**: Exactly **77 passed** when the GenLayer standard library runner is available.
+
+#### Contract Runtime Prerequisite:
+GenLayer Intelligent Contracts execute within the GenVM WASI runtime. Running the Python contract tests requires the GenLayer SDK standard library (`py-lib-genlayer-std`), which is packaged with GenLayer Studio or GenVM runner bundles rather than distributed via PyPI.
+
+To execute `npm run test:contract`:
+1. Install Python test dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Ensure the GenLayer standard library runner is available via any of the following:
+   - Run inside **GenLayer Studio** or have `~/.cache/genvm-linter` populated by `genvm-lint`.
+   - Set the `GENLAYER_SDK_PATH` environment variable pointing to your `py-lib-genlayer-std` directory:
+     ```bash
+     export GENLAYER_SDK_PATH=/path/to/py-lib-genlayer-std
+     ```
+   - Set the `GENVMROOT` environment variable pointing to your local GenVM installation:
+     ```bash
+     export GENVMROOT=/path/to/genvm
+     ```
+3. Run the contract suite:
+   ```bash
+   npm run test:contract
+   # or directly:
+   pytest tests/test_brief_arena.py tests/test_brief_arena_simulation.py -v
+   ```
+*(If the runner is not found, `tests/conftest.py` will report the missing runtime and instructions clearly).*
 
 ### Optional Verification Tooling
 The repository also includes optional diagnostic suites designed for developer environments:

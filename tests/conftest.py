@@ -4,7 +4,7 @@ tests/conftest.py
 Pytest configuration and portable GenLayer SDK environment bootstrap.
 Resolves repository root dynamically without hardcoded paths, sets up WASI mocks,
 and configures the GenLayer standard library path portably across developer machines,
-CI runners, and clean clones.
+CI runners, and GenLayer Studio installations.
 """
 
 import os
@@ -101,5 +101,34 @@ def setup_genlayer_sdk():
             return
     except Exception:
         pass
+
+    # D. Final check: if genlayer could not be loaded, report explicit setup steps
+    try:
+        import genlayer as gl
+        if hasattr(gl, "storage") and hasattr(gl.storage, "inmem_allocate"):
+            return
+    except ImportError:
+        pass
+
+    raise RuntimeError(
+        "\n" + "=" * 76 + "\n"
+        "GENLAYER CONTRACT RUNTIME PREREQUISITE MISSING\n"
+        "=" * 76 + "\n"
+        "The Python in-memory contract test suite requires the GenLayer Intelligent\n"
+        "Contract standard library ('py-lib-genlayer-std'), which runs within the GenVM\n"
+        "WASI execution environment. This package is distributed via GenLayer Studio\n"
+        "or GenVM runner bundles rather than PyPI.\n\n"
+        "To run Python contract tests ('npm run test:contract'), provide the runtime\n"
+        "using one of the following methods:\n"
+        "  1. Set GENLAYER_SDK_PATH to your py-lib-genlayer-std directory:\n"
+        "       export GENLAYER_SDK_PATH=/path/to/py-lib-genlayer-std\n"
+        "  2. Set GENVMROOT to your local GenVM / GenLayer Studio installation:\n"
+        "       export GENVMROOT=/path/to/genvm\n"
+        "  3. Open the project in GenLayer Studio or run 'genvm-lint setup'\n"
+        "     to populate ~/.cache/genvm-linter with the standard library runner.\n\n"
+        "Note: All 6 frontend and transaction layer integration suites run with zero\n"
+        "external prerequisites via 'npm test' or 'npm run test:frontend'.\n"
+        "=" * 76
+    )
 
 setup_genlayer_sdk()
