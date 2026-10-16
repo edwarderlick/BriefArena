@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { NavLink, Link } from 'react-router-dom';
 import { useWallet } from '../context/WalletContext';
 import { NETWORK_CONFIG } from '../types';
+import { BriefArenaLogo } from './BriefArenaLogo';
 
 export const Header: React.FC = () => {
   const { isConnected, address, balance, isConnecting, isCorrectNetwork, connectWallet, disconnectWallet, switchNetwork } = useWallet();
@@ -21,13 +22,16 @@ export const Header: React.FC = () => {
       <div className="h-20 w-full px-4 sm:px-6 lg:px-12 flex items-center justify-between gap-4">
         {/* Left: Brand + Nav */}
         <div className="flex items-center gap-6 lg:gap-10">
-          <Link to="/" className="flex items-center gap-2 group text-decoration-none">
-            <span className="font-serif text-2xl text-primary-fixed tracking-tight font-medium group-hover:text-surface-bright transition-colors">
-              BriefArena
-            </span>
-            <span className="px-2 py-0.5 rounded-full bg-tertiary-container text-primary-fixed-dim text-[11px] font-semibold uppercase tracking-wider">
-              Studio
-            </span>
+          <Link to="/" className="flex items-center gap-3 group text-decoration-none" aria-label="BriefArena Home">
+            <BriefArenaLogo className="w-9 h-9 transition-transform group-hover:scale-105" />
+            <div className="flex items-center gap-2">
+              <span className="font-serif text-2xl text-primary-fixed tracking-tight font-medium group-hover:text-surface-bright transition-colors">
+                BriefArena
+              </span>
+              <span className="px-2 py-0.5 rounded-full bg-tertiary-container text-primary-fixed-dim text-[11px] font-semibold uppercase tracking-wider">
+                Studio
+              </span>
+            </div>
           </Link>
 
           {/* Desktop Nav */}

@@ -40,17 +40,30 @@ GenLayer introduces **Intelligent Contracts** written in Python executing inside
 ```mermaid
 flowchart TD
     A[Sponsor creates Brief] -->|Escrows >= 10 test GEN| B[Challenge OPEN: 0/3 Slots]
-    B -->|Entrant 1 submits copy| C[1/3 Slots Filled]
+
+    %% Zero-Entry Cancellation / Expiration Path
+    B -->|Zero entries: Sponsor cancels at any time| Cancel[Sponsor cancels brief]
+    B -->|Zero entries: Deadline expires| Expire[Anyone expires zero entries]
+    Cancel -->|100% Escrow Refund| SponsorCredit[Sponsor Internal Credit]
+    Expire -->|100% Escrow Refund| SponsorCredit
+
+    %% Submission & Contest Path
+    B -->|Entrant 1 submits copy| C[1/3 Slots Filled - Cancellation Blocked]
     C -->|Entrant 2 submits copy| D[2/3 Slots Filled]
     D -->|Entrant 3 submits copy| E[3/3 Slots Filled - Auto-CLOSED]
-    B -->|Zero entries + Deadline expires| Cancel[Sponsor cancels brief]
-    Cancel -->|100% Refund| SponsorCredit[Sponsor Internal Credit]
-    E -->|Anyone calls commit_judging| F[48h Deliberation Window]
-    F -->|Validators run LLM Consensus| G{Consensus Outcome}
-    G -->|Single Winner Chosen| H[100% Prize -> Winner Credit]
-    G -->|Tied / No Entry Qualifies| I[100% Prize -> Sponsor Credit Refund]
-    H -->|Winner calls withdraw| J[Child transfer: Native test GEN to EOA Wallet]
-    SponsorCredit -->|Sponsor calls withdraw| K[Child transfer: Native test GEN to EOA Wallet]
+    C -->|Deadline passes with 1-2 entries| CloseDeadline[Anyone closes deadline]
+    D -->|Deadline passes with 1-2 entries| CloseDeadline
+    CloseDeadline --> E2[Challenge CLOSED]
+
+    E --> F[Anyone calls commit_judging]
+    E2 --> F
+    F -->|48h Deliberation Window| G{Validators run LLM Consensus}
+    G -->|Single Winner Chosen| H[100% Escrow -> Winner Internal Credit]
+    G -->|Tied / No Entry Qualifies| SponsorCredit
+
+    %% Pull-Payment Withdrawals to EOA Wallets
+    H -->|Winner calls withdraw| J[Child message: Native test GEN to Winner Wallet]
+    SponsorCredit -->|Sponsor calls withdraw| K[Child message: Native test GEN to Sponsor Wallet]
 ```
 
 ### 1. Sponsor Brief Creation
@@ -91,7 +104,7 @@ flowchart TD
 - If no entries meet the brief criteria or validators determine an indistinguishable tie, the consensus resolves to `NO_WINNER`, and 100% of the prize escrow is credited back to the sponsor.
 
 ### 5. Zero-Entry Cancellation & Refunds
-- If a brief receives zero entries, the sponsor can call `cancel_challenge(challenge_id)` before or upon deadline expiration.
+- If a brief receives zero entries, the sponsor can call `cancel_challenge(challenge_id)` at any time (even before deadline expiration).
 - Alternatively, anyone can call `expire_zero_entries(challenge_id)` after the deadline passes.
 - 100% of the escrowed prize is refunded to the sponsor's internal credit.
 - **Guard**: Cancellation is strictly prohibited once even a single entry has been submitted (`filledSlots > 0`).
@@ -146,11 +159,11 @@ BriefArena/
 │   └── brief_arena.py               # GenLayer Intelligent Contract (Python)
 ├── app/                             # React 19 + TypeScript + Vite Frontend
 │   ├── src/
-│   │   ├── components/              # Header, Footer, Modals, Transaction Tracker
+│   │   ├── components/              # Header, Footer, Modals, Transaction Tracker, Logo
 │   │   ├── pages/                   # Landing, Explore, Create, Submit, Detail, Decision, MyArena
 │   │   ├── services/                # contractClient, transactionService, transactionController
 │   │   └── types/                   # Contract types, network configurations
-│   ├── public/                      # SVG assets, icons, favicon
+│   ├── public/                      # SVG assets, logo, favicon
 │   ├── .env.example                 # Frontend environment configuration template
 │   ├── package.json                 # Frontend dependencies & build scripts
 │   ├── tsconfig.json                # TypeScript compiler configuration
@@ -172,6 +185,7 @@ BriefArena/
 ├── pytest.ini                       # Pytest configuration
 ├── package.json                     # Root project manifest & testing tooling
 ├── package-lock.json                # Root dependency lockfile
+├── LICENSE                          # MIT License
 ├── .env.example                     # Root environment configuration template
 └── .gitignore                       # Git exclusion rules
 ```
@@ -181,23 +195,24 @@ BriefArena/
 ## Local Development Setup
 
 ### Prerequisites
-- **Node.js**: v18.0.0 or higher (v20+ recommended)
+- **Node.js**: v20.19.0+ or v22.12.0+ (required by Vite 8)
 - **npm**: v9.0.0 or higher
 - **Python**: 3.10, 3.11, or 3.12 (for running Python contract tests)
 - **Browser Wallet**: MetaMask, Rabby, or any EIP-1193 wallet configured for custom networks.
 
-### 1. Clone & Install Dependencies
+### 1. Clone & Clean Install Dependencies
+Use `npm ci` for clean, deterministic installations matching the repository lockfiles:
 ```bash
 # Clone the repository
 git clone https://github.com/edwarderlick/BriefArena.git
 cd BriefArena
 
-# Install root dependencies
-npm install
+# Clean install root dependencies
+npm ci
 
-# Install frontend dependencies
+# Clean install frontend dependencies
 cd app
-npm install
+npm ci
 cd ..
 ```
 
@@ -217,15 +232,35 @@ VITE_BRIEF_ARENA_CONTRACT_ADDRESS=0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9
 VITE_WRITES_ENABLED=false
 ```
 
-### 3. Run Development Server
+### 3. Running Locally & Enabling Testnet Wallet Writes
+
+BriefArena uses a build-time safety gate (`VITE_WRITES_ENABLED`) to prevent accidental transactions while previewing the interface:
+
+#### Option A: Read-Only Preview Mode (Default)
+In this mode, all on-chain write operations are gated. You can browse live challenges, inspect contract state, and explore design preview fixtures safely without connecting a funded wallet.
 ```bash
-# Start frontend in read-only mode (port 5180)
 cd app
 npm run dev
-
-# Or start with on-chain writes enabled for testnet interaction
-npm run dev:writes
 ```
+Visit `http://localhost:5180`.
+
+#### Option B: Enabled Writes Mode (Live Testnet Transactions)
+To enable live wallet transactions (`create_challenge`, `submit_entry`, `cancel_challenge`, `withdraw`):
+1. **Start with Writes Enabled**:
+   ```bash
+   cd app
+   npm run dev:writes
+   ```
+   *(This launches Vite with `--mode writes`, loading `app/.env.writes` where `VITE_WRITES_ENABLED=true`).*
+   Alternatively, set `VITE_WRITES_ENABLED=true` directly inside your `app/.env` file and run `npm run dev`.
+2. **Network Setup**: Ensure your browser wallet (MetaMask, Rabby) is connected to **GenLayer Studio Next**:
+   - **Network Name**: GenLayer Studio Next
+   - **Chain ID**: `61997` (Hex: `0xF22D`)
+   - **RPC URL**: `https://studio-next.genlayer.com/api`
+   - **Currency Symbol**: `GEN`
+   - **Block Explorer**: `https://explorer-studio-dev.genlayer.com/`
+3. **Test GEN Balance**: You will need native `test GEN` to pay the minimum 10 test GEN prize escrow and transaction gas fees.
+4. **Contract Address**: Ensure `VITE_BRIEF_ARENA_CONTRACT_ADDRESS` is set to the live contract `0x5614108eDBdAb6c0b6313725EDe8f1029F74F4F9`.
 Visit `http://localhost:5180` in your browser.
 
 ---
@@ -313,4 +348,5 @@ In the Vercel Project Settings under **Environment Variables**, add:
 ---
 
 ## License
-MIT License. Created for the GenLayer ecosystem.
+Released under the [MIT License](LICENSE). Copyright © 2026 edwarderlick / BriefArena Contributors.
+
